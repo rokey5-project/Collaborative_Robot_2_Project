@@ -1,3 +1,0 @@
-[submodule "src/facialAge"]
-	path = src/facialAge
-	url = https://github.com/Ebimsv/Facial_Age_estimation_PyTorch.git
