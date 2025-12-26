@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'face_age_node = albaro.face_age_node:main',
+            'picking_node = albaro.picking_node:main'
         ],
     },
 )
