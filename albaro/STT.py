@@ -1,6 +1,3 @@
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # GUI 백엔드 강제 (가능하면 cv2 import 전에)
-
 from openai import OpenAI
 import cv2
 import time
@@ -11,15 +8,19 @@ from PIL import Image
 from transformers import AutoImageProcessor, SiglipForImageClassification
 import tempfile
 import subprocess
+import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 
 # =====================================================
-# 1. .env 로딩 (안전하게)
+# 1. .env 로딩 (STT 코드와 동일)
 # =====================================================
-ENV_PATH = Path(__file__).resolve().parent / ".env"
-print("ENV_PATH =", ENV_PATH, "exists =", ENV_PATH.exists())
+BASE_DIR = Path(__file__).resolve().parent   # ← 중요
+ENV_PATH = BASE_DIR / ".env"
+
+print("ENV_PATH =", ENV_PATH)
 
 load_dotenv(ENV_PATH, override=True)
 
@@ -28,6 +29,10 @@ if not openai_api_key:
     raise RuntimeError(f"OPENAI_API_KEY not loaded. Checked: {ENV_PATH}")
 
 
+
+# =====================================================
+# 2. IOU (간이 트래킹)
+# =====================================================
 def iou(boxA, boxB):
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
@@ -42,10 +47,15 @@ def iou(boxA, boxB):
     return interArea / union if union > 0 else 0.0
 
 
+# =====================================================
+# 3. FaceAge + TTS 클래스 (STT와 동일 패턴)
+# =====================================================
 class FaceAgeTTS:
     def __init__(self, openai_api_key):
+        # ---- OpenAI client (STT와 동일) ----
         self.client = OpenAI(api_key=openai_api_key)
 
+        # ---- Age model ----
         model_name = "prithivMLmods/facial-age-detection"
         self.model = SiglipForImageClassification.from_pretrained(model_name)
         self.processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
@@ -61,23 +71,32 @@ class FaceAgeTTS:
             7: "age 80+"
         }
 
+        # ---- Face detector ----
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
 
+        # ---- Camera ----
         self.cap = cv2.VideoCapture(6)
         if not self.cap.isOpened():
             raise RuntimeError("웹캠을 열 수 없습니다")
 
+        # ---- Tracking ----
         self.next_person_id = 0
         self.tracks = {}
         self.TRACK_IOU_TH = 0.4
         self.TRACK_TTL = 2.0
 
+        # ---- TTS thread ----
         self.tts_queue = Queue()
-        self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
+        self.tts_thread = threading.Thread(
+            target=self.tts_worker, daemon=True
+        )
         self.tts_thread.start()
 
+    # -----------------------------
+    # OpenAI TTS worker
+    # -----------------------------
     def tts_worker(self):
         while True:
             text = self.tts_queue.get()
@@ -87,13 +106,12 @@ class FaceAgeTTS:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
                 audio_path = f.name
 
-            # 최신 스트리밍 방식 (경고 제거)
-            with self.client.audio.speech.with_streaming_response.create(
+            response = self.client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice="alloy",
                 input=text
-            ) as response:
-                response.stream_to_file(audio_path)
+            )
+            response.stream_to_file(audio_path)
 
             subprocess.run(
                 ["ffplay", "-nodisp", "-autoexit", audio_path],
@@ -104,6 +122,9 @@ class FaceAgeTTS:
             os.remove(audio_path)
             self.tts_queue.task_done()
 
+    # -----------------------------
+    # Age classification
+    # -----------------------------
     def classify_image(self, image):
         image = Image.fromarray(image).convert("RGB")
         inputs = self.processor(images=image, return_tensors="pt")
@@ -114,6 +135,9 @@ class FaceAgeTTS:
 
         return self.id2label[int(torch.argmax(probs))]
 
+    # -----------------------------
+    # Tracking
+    # -----------------------------
     def assign_id(self, box):
         now = time.time()
         best_iou, best_id = 0.0, None
@@ -130,7 +154,11 @@ class FaceAgeTTS:
 
         pid = self.next_person_id
         self.next_person_id += 1
-        self.tracks[pid] = {"box": box, "warned": False, "last_seen": now}
+        self.tracks[pid] = {
+            "box": box,
+            "warned": False,
+            "last_seen": now
+        }
         return pid
 
     def cleanup_tracks(self):
@@ -140,6 +168,9 @@ class FaceAgeTTS:
             if now - info["last_seen"] <= self.TRACK_TTL
         }
 
+    # -----------------------------
+    # Main loop
+    # -----------------------------
     def run(self):
         while True:
             ret, frame = self.cap.read()
@@ -147,7 +178,9 @@ class FaceAgeTTS:
                 break
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, 1.1, 10, minSize=(30, 30))
+            faces = self.face_cascade.detectMultiScale(
+                gray, 1.1, 10, minSize=(30, 30)
+            )
 
             for (x, y, w, h) in faces:
                 pid = self.assign_id((x, y, w, h))
@@ -155,24 +188,24 @@ class FaceAgeTTS:
                 age_group = self.classify_image(face)
 
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {pid} | {age_group}", (x, y-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(
+                    frame,
+                    f"ID {pid} | {age_group}",
+                    (x, y-10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 255, 0),
+                    2
+                )
 
                 if age_group in ("age 01-10", "age 11-20") and not self.tracks[pid]["warned"]:
                     self.tts_queue.put("미성년자는 구매할 수 없습니다.")
                     self.tracks[pid]["warned"] = True
 
             self.cleanup_tracks()
+            cv2.imshow("Age Detection", frame)
 
-            # GUI 방어: 실패 시 원인 출력
-            try:
-                cv2.imshow("Age Detection", frame)
-                key = cv2.waitKey(1) & 0xFF
-            except cv2.error as e:
-                print("OpenCV GUI error:", e)
-                key = 255
-
-            if key == 27:
+            if cv2.waitKey(1) & 0xFF == 27:
                 break
 
         self.tts_queue.put(None)
@@ -180,6 +213,9 @@ class FaceAgeTTS:
         cv2.destroyAllWindows()
 
 
+# =====================================================
+# 4. 단독 실행 (STT와 동일)
+# =====================================================
 if __name__ == "__main__":
     app = FaceAgeTTS(openai_api_key)
     app.run()
