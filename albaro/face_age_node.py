@@ -28,6 +28,7 @@ class FaceAgeNode(Node):
     }
 
     self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    self.detect_camera()
 
   def classify_image(self, image):
     image = Image.fromarray(image).convert("RGB")
@@ -43,7 +44,7 @@ class FaceAgeNode(Node):
     return predicted_age_group
 
   def detect_camera(self):
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(8)
 
     if not cap.isOpened():
       raise RuntimeError("웹캠을 열 수 없습니다")
@@ -56,7 +57,7 @@ class FaceAgeNode(Node):
 
       gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-      faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=15, minSize=(30, 30))
+      faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=10, minSize=(30, 30))
 
       for (x, y, w, h) in faces:
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -68,6 +69,7 @@ class FaceAgeNode(Node):
         cv2.putText(frame, f"Predicted Age: {predicted_age_group}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
 
       cv2.imshow("Webcam", frame)
+      cv2.waitKey(1)
 
 def main(args=None):
   rclpy.init(args=args)
