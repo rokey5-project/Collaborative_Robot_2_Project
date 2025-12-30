@@ -1,12 +1,12 @@
 import os
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # GUI 백엔드 강제 (가능하면 cv2 import 전에)
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
-from openai import OpenAI
-import cv2
 import time
+import cv2
 import torch
 import threading
 from queue import Queue
+from collections import deque
 from PIL import Image
 from transformers import AutoImageProcessor, SiglipForImageClassification
 import tempfile
@@ -14,38 +14,51 @@ import subprocess
 from pathlib import Path
 from dotenv import load_dotenv
 
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from openai import OpenAI
 
-# =====================================================
-# 1. .env 로딩 (안전하게)
-# =====================================================
+
+# ===============================
+# ENV
+# ===============================
 ENV_PATH = Path(__file__).resolve().parent / ".env"
-print("ENV_PATH =", ENV_PATH, "exists =", ENV_PATH.exists())
-
 load_dotenv(ENV_PATH, override=True)
 
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise RuntimeError(f"OPENAI_API_KEY not loaded. Checked: {ENV_PATH}")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not found")
 
 
+# ===============================
+# IoU
+# ===============================
 def iou(boxA, boxB):
     xA = max(boxA[0], boxB[0])
     yA = max(boxA[1], boxB[1])
     xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
     yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
-
-    interW = max(0, xB - xA)
-    interH = max(0, yB - yA)
-    interArea = interW * interH
-
-    union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - interArea
-    return interArea / union if union > 0 else 0.0
+    inter = max(0, xB - xA) * max(0, yB - yA)
+    union = boxA[2]*boxA[3] + boxB[2]*boxB[3] - inter
+    return inter / union if union > 0 else 0.0
 
 
-class FaceAgeTTS:
-    def __init__(self, openai_api_key):
-        self.client = OpenAI(api_key=openai_api_key)
+class FaceAgeNode(Node):
+    def __init__(self):
+        super().__init__("face_age_node")
 
+        # ItemCheckNode → FaceAgeNode
+        self.sub = self.create_subscription(
+            Bool, "/need_face_check", self.start_cb, 10
+        )
+
+        self.active = False
+
+        # OpenAI
+        self.client = OpenAI(api_key=OPENAI_API_KEY)
+
+        # Age model
         model_name = "prithivMLmods/facial-age-detection"
         self.model = SiglipForImageClassification.from_pretrained(model_name)
         self.processor = AutoImageProcessor.from_pretrained(model_name, use_fast=True)
@@ -61,23 +74,35 @@ class FaceAgeTTS:
             7: "age 80+"
         }
 
+        # Face detector
         self.face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
 
-        self.cap = cv2.VideoCapture(6)
-        if not self.cap.isOpened():
-            raise RuntimeError("웹캠을 열 수 없습니다")
+        # Tracking
+        self.tracks = {}   # pid: {box, history, decided}
+        self.next_pid = 0
+        self.IOU_TH = 0.4
 
-        self.next_person_id = 0
-        self.tracks = {}
-        self.TRACK_IOU_TH = 0.4
-        self.TRACK_TTL = 2.0
-
+        # TTS
         self.tts_queue = Queue()
-        self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
-        self.tts_thread.start()
+        threading.Thread(target=self.tts_worker, daemon=True).start()
 
+        self.get_logger().info("FaceAge node ready (waiting /need_face_check)")
+
+    # ===============================
+    # ROS callback
+    # ===============================
+    def start_cb(self, msg: Bool):
+        if msg.data and not self.active:
+            self.active = True
+            self.tracks.clear()
+            self.get_logger().info("need_face_check received → FaceAge start")
+            threading.Thread(target=self.run, daemon=True).start()
+
+    # ===============================
+    # TTS
+    # ===============================
     def tts_worker(self):
         while True:
             text = self.tts_queue.get()
@@ -85,101 +110,121 @@ class FaceAgeTTS:
                 break
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-                audio_path = f.name
+                path = f.name
 
-            # 최신 스트리밍 방식 (경고 제거)
             with self.client.audio.speech.with_streaming_response.create(
                 model="gpt-4o-mini-tts",
                 voice="alloy",
                 input=text
-            ) as response:
-                response.stream_to_file(audio_path)
+            ) as r:
+                r.stream_to_file(path)
 
             subprocess.run(
-                ["ffplay", "-nodisp", "-autoexit", audio_path],
+                ["ffplay", "-nodisp", "-autoexit", path],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            os.remove(path)
 
-            os.remove(audio_path)
-            self.tts_queue.task_done()
-
-    def classify_image(self, image):
-        image = Image.fromarray(image).convert("RGB")
+    # ===============================
+    # Vision utils
+    # ===============================
+    def classify(self, face):
+        image = Image.fromarray(face).convert("RGB")
         inputs = self.processor(images=image, return_tensors="pt")
-
         with torch.no_grad():
-            outputs = self.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=1).squeeze()
-
-        return self.id2label[int(torch.argmax(probs))]
+            logits = self.model(**inputs).logits
+        return self.id2label[int(torch.argmax(logits))]
 
     def assign_id(self, box):
-        now = time.time()
         best_iou, best_id = 0.0, None
-
         for pid, info in self.tracks.items():
             score = iou(box, info["box"])
             if score > best_iou:
                 best_iou, best_id = score, pid
 
-        if best_iou >= self.TRACK_IOU_TH:
+        if best_iou >= self.IOU_TH:
             self.tracks[best_id]["box"] = box
-            self.tracks[best_id]["last_seen"] = now
             return best_id
 
-        pid = self.next_person_id
-        self.next_person_id += 1
-        self.tracks[pid] = {"box": box, "warned": False, "last_seen": now}
+        pid = self.next_pid
+        self.next_pid += 1
+        self.tracks[pid] = {
+            "box": box,
+            "history": deque(maxlen=3),
+            "decided": False
+        }
         return pid
 
-    def cleanup_tracks(self):
-        now = time.time()
-        self.tracks = {
-            pid: info for pid, info in self.tracks.items()
-            if now - info["last_seen"] <= self.TRACK_TTL
-        }
-
+    # ===============================
+    # Main loop
+    # ===============================
     def run(self):
-        while True:
-            ret, frame = self.cap.read()
+        cap = cv2.VideoCapture(6)
+
+        while rclpy.ok() and self.active:
+            ret, frame = cap.read()
             if not ret:
                 break
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, 1.1, 10, minSize=(30, 30))
+            faces = self.face_cascade.detectMultiScale(gray, 1.1, 10)
 
             for (x, y, w, h) in faces:
                 pid = self.assign_id((x, y, w, h))
+                track = self.tracks[pid]
+
                 face = frame[y:y+h, x:x+w]
-                age_group = self.classify_image(face)
+                age = self.classify(face)
 
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {pid} | {age_group}", (x, y-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # 기록
+                if age in ("age 01-10", "age 11-20"):
+                    track["history"].append("minor")
+                else:
+                    track["history"].append("adult")
 
-                if age_group in ("age 01-10", "age 11-20") and not self.tracks[pid]["warned"]:
-                    self.tts_queue.put("미성년자는 구매할 수 없습니다.")
-                    self.tracks[pid]["warned"] = True
+                # 판정
+                if len(track["history"]) == 3 and not track["decided"]:
+                    if track["history"].count("minor") >= 2:
+                        self.tts_queue.put("미성년자는 구매할 수 없습니다.")
+                        track["decided"] = True
+                        self.active = False
+                        break
 
-            self.cleanup_tracks()
+                    if track["history"].count("adult") >= 2:
+                        self.tts_queue.put("감사합니다.")
+                        track["decided"] = True
+                        self.active = False
+                        break
 
-            # GUI 방어: 실패 시 원인 출력
-            try:
-                cv2.imshow("Age Detection", frame)
-                key = cv2.waitKey(1) & 0xFF
-            except cv2.error as e:
-                print("OpenCV GUI error:", e)
-                key = 255
+                # 시각화
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0,255,0), 2)
+                cv2.putText(
+                    frame,
+                    f"ID {pid} | {age} | {list(track['history'])}",
+                    (x, y-10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0,255,0),
+                    2
+                )
 
-            if key == 27:
+            cv2.imshow("FaceAge", frame)
+            if cv2.waitKey(1) == 27:
                 break
 
-        self.tts_queue.put(None)
-        self.cap.release()
+        cap.release()
         cv2.destroyAllWindows()
+        self.active = False
+
+
+def main():
+    rclpy.init()
+    node = FaceAgeNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == "__main__":
-    app = FaceAgeTTS(openai_api_key)
-    app.run()
+    main()
