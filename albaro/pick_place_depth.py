@@ -116,22 +116,11 @@ class SmartStoreNode(Node):
                 for _ in range(count):
                     self.order_queue.append(item)
                 print(f"{item, count}")
-                
+            
+            threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start() 
+            
         except Exception as e:
             self.get_logger().error(f"주문 파싱 오류: {e}")
-
-    # def vision_callback(self, msg):
-    #     self.last_frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-    #     if not self.order_queue or self.is_robot_busy or self.last_depth_frame is None:
-    #         return
-        
-    #     # 현재 처리해야 할 타겟
-    #     target_label = self.order_queue[0]
-        
-    #     # 이전 코드의 안정적인 스레딩 방식 사용
-    #     self.is_robot_busy = True
-    #     threading.Thread(target=self.delivery_process, args=(target_label,)).start()
-
 
     def vision_callback(self, msg):
         # print("get topic")
@@ -150,50 +139,6 @@ class SmartStoreNode(Node):
         if self.last_depth_frame is None:
             self.get_logger().warn("주문은 있으나 Depth 프레임이 아직 없습니다!")
             return
-
-        # 여기까지 왔다면 조건 만족
-        target_label = self.order_queue[0]
-        self.get_logger().info(f"조건 만족! {target_label} 배송 스레드를 시작합니다.")
-        
-        self.is_robot_busy = True # 스레드 시작 전 미리 선점
-        threading.Thread(target=self.delivery_process, args=(target_label,), daemon=True).start()
-
-
-    # --- 메인 실행 로직 ---
-    # def delivery_process(self, label):
-    #     self.get_logger().info(f"--- {label} 보충 프로세스 시작 ---")
-    #     try:
-    #         # 1. 창고 접근 (2단계 movej)
-    #         for pos in self.routes[label]['approach']:
-    #             self.movej(pos, vel=60, acc=60, ra=1)
-    #         self.wait(1.5)
-
-    #         # 2. YOLO 인식 (정확한 타겟 조준)
-    #         results = self.model.predict(source=self.last_frame, conf=0.5, verbose=False)
-    #         target_box = None
-    #         for box in results[0].boxes:
-    #             if results[0].names[int(box.cls[0])] == label:
-    #                 target_box = box
-    #                 break
-
-    #         if target_box is None:
-    #             self.get_logger().warn(f"{label}을 찾을 수 없습니다.")
-    #         else:
-    #             # 3. 실시간 피킹 실행
-    #             x1, y1, x2, y2 = map(int, target_box.xyxy[0])
-    #             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-    #             self.execute_vision_pick(cx, cy)
-                
-    #             # 4. 매대 이동 및 내려놓기
-    #             self.routes[label]['stand']()
-    #             self.get_logger().info(f"{label} 보충 완료")
-
-    #         self.order_queue.pop(0)
-
-    #     except Exception as e:
-    #         self.get_logger().error(f"실행 중 오류: {e}")
-    #     finally:
-    #         self.is_robot_busy = False
 
     def delivery_process(self, label):
         self.get_logger().info(f"--- [스레드 시작] 타겟: {label} ---")
@@ -223,6 +168,7 @@ class SmartStoreNode(Node):
                 x1, y1, x2, y2 = map(int, target_box.xyxy[0])
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 self.get_logger().info(f"좌표 감지 ({cx}, {cy}), 피킹 실행")
+                self.get_logger().info(f"")
                 self.execute_vision_pick(cx, cy)
                 
                 self.get_logger().info("매대로 이동 중...")
@@ -240,44 +186,6 @@ class SmartStoreNode(Node):
         finally:
             self.is_robot_busy = False # 에러가 나더라도 반드시 False로 복구
 
-
-
-    # def execute_vision_pick(self, cx, cy):
-    #     """Depth 기반 정밀 피킹"""
-    #     z_mm = self.last_depth_frame[cy, cx]
-    #     if z_mm <= 0: return
-
-    #     # 카메라 좌표 계산
-    #     cam_x = (cx - self.intrinsics["ppx"]) * z_mm / self.intrinsics["fx"]
-    #     cam_y = (cy - self.intrinsics["ppy"]) * z_mm / self.intrinsics["fy"]
-    #     cam_coords = np.array([cam_x, cam_y, z_mm, 1.0])
-
-    #     # 베이스 좌표 변환
-    #     curr_pos = self.get_current_posx()[0]
-    #     R = Rotation.from_euler("ZYZ", curr_pos[3:], degrees=True).as_matrix()
-    #     T = np.eye(4); T[:3,:3]=R; T[:3,3]=curr_pos[:3]
-    #     target_pos = (T @ self.gripper2cam @ cam_coords)[:3]
-    #     self.get_logger().info(f"{target_pos}")
-
-    #     # 모션 시퀀스
-    #     approach = self.posx([target_pos[0], target_pos[1], target_pos[2]+100, curr_pos[3], curr_pos[4], curr_pos[5]])
-    #     pick = self.posx([target_pos[0], target_pos[1], target_pos[2]-40, curr_pos[3], curr_pos[4], curr_pos[5]])
-
-    #     self.get_logger().info(f"target pos: {target_pos}")
-    #     self.get_logger().info(f"approach: {approach}")
-    #     self.get_logger().info(f"pick: {pick}")
-    #     self.wait(5.0)
-    #     self.get_logger().info(f"approach 지점 이동")        
-    #     self.movel(approach, vel=30, acc = 30)
-    #     self.get_logger().info(f"pick 지점 이동") 
-    #     self.movel(pick, vel=30, acc = 30)
-    #     self.wait(1.0)
-    #     self.set_do(1, 1); self.set_do(2, 0); self.wait(1.0) # 그리퍼 닫기
-    #     self.get_logger().info(f"피킹 완료. 매대 이동 준비")
-    #     self.movel(approach, vel=30, acc = 30)
-    #     self.get_logger().info(f"중간지점 이동")
-    #     self.movej(self.posj(-21.00, -7.23, 102.58, 1.29, -6.27, 88.93), vel=30, acc=30, ra=1)
-    #     self.movej(self.posj(-34.18, -14.68, 94.26, 1.29, 8.00, 88.93), vel=30, acc=30, ra=1)
 
     def execute_vision_pick(self, cx, cy):
         """Depth 기반 정밀 피킹"""
@@ -298,27 +206,24 @@ class SmartStoreNode(Node):
             T = np.eye(4); T[:3,:3]=R; T[:3,3]=curr_pos[:3]
             target_pos = (T @ self.gripper2cam @ cam_coords)[:3]
 
-            # 모션 시퀀스 설정
-            approach = self.posx([target_pos[0], target_pos[1], target_pos[2]+100, curr_pos[3], curr_pos[4], curr_pos[5]])
-            pick = self.posx([target_pos[0], target_pos[1], target_pos[2]-40, curr_pos[3], curr_pos[4], curr_pos[5]])
+
+            pick = self.posx([target_pos[0]+70, curr_pos[1], curr_pos[2], curr_pos[3], curr_pos[4], curr_pos[5]])
 
             self.get_logger().info(f"상세 좌표: {target_pos}")
             
-            # --- 실제 로봇 동작 시작 ---
-            self.get_logger().info("1. Approach 지점(L) 이동")        
-            self.movel(approach, vel=20, acc=20) # posx이므로 movel 사용
-            self.wait(2.0)
+
 
             self.get_logger().info("2. Pick 지점(L) 이동") 
             self.movel(pick, vel=20, acc=20)
-            self.wait(2.0)
+
             
             self.wait(0.5)
             self.get_logger().info("3. 그리퍼 닫기")
             self.set_do(1, 1); self.set_do(2, 0); self.wait(1.0) 
             
             self.get_logger().info("4. 물체 들어올리기(L)")
-            self.movel(approach, vel=40, acc=40)
+            # self.movel(approach, vel=40, acc=40)
+            self.movel(self.posx(0, 0, 50, 0, 0, 0),vel=60, acc=60, mod=1)
             
             self.get_logger().info("5. 중간 안전지대 이동(J)")
             # 관절 포즈는 movej로 이동
@@ -337,8 +242,7 @@ class SmartStoreNode(Node):
 
         self.movej(self.posj(-30.25, 38.45, 23.09, -11.04, 110.93, 53.81), vel=60, acc=60, ra=1)
         self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
-        self.movel(self.posx(0, 0, 100, 0, 0, 0),vel=60, acc=60, mod=1)
-        self.movej(self.posj(-92.90, -8.97, 82.16, 1.34, 94.19, -3.99),vel=60, acc=60, ra=1)
+        self.movel(self.posx(0, 0, 30, 0, 0, 0),vel=60, acc=60, mod=1)
         self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
         
 
@@ -403,51 +307,6 @@ def main(args=None):
     finally:
         cv2.destroyAllWindows()
         rclpy.shutdown()
-
-# def main(args=None):
-#     rclpy.init(args=args)
-    
-#     # 1. 노드 생성 (네임스페이스를 명시적으로 부여)
-#     # 실제 환경에서 토픽들이 /dsr01/order_item 인지 /order_item 인지 확인이 필요합니다.
-#     node = SmartStoreNode(None) # 임시 생성
-    
-#     # 2. DSR 초기화 (이전 해결 방식 유지)
-#     DR_init.__dsr__node = node
-#     DR_init.__dsr__id = "dsr01"
-#     DR_init.__dsr__model = "m0609"
-
-#     import DSR_ROBOT2 as dsr
-#     from DR_common2 import posx, posj
-    
-#     dsr_funcs = {
-#         'get_current_posx': dsr.get_current_posx,
-#         'movej': dsr.movej, 'movel': dsr.movel, 'wait': dsr.wait,
-#         'posx': posx, 'posj': posj, 'set_digital_output': dsr.set_digital_output
-#     }
-
-#     # 3. 실제 기능을 가진 노드로 다시 세팅
-#     node.get_current_posx = dsr_funcs['get_current_posx']
-#     node.movel = dsr_funcs['movel']
-#     node.movej = dsr_funcs['movej']
-#     node.wait = dsr_funcs['wait']
-#     node.posx = dsr_funcs['posx']
-#     node.posj = dsr_funcs['posj']
-#     node.set_do = dsr_funcs['set_digital_output']
-
-#     # 4. 실행기 설정 (하나의 노드만 돌려도 충분합니다)
-#     executor = MultiThreadedExecutor()
-#     executor.add_node(node)
-
-#     # 로그를 통해 토픽 연결 확인
-#     node.get_logger().info("--- 노드가 실행되었습니다. 토픽 대기 중 ---")
-
-#     try:
-#         executor.spin()
-#     except KeyboardInterrupt:
-#         pass
-#     finally:
-#         node.destroy_node()
-#         rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
