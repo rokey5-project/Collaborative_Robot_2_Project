@@ -28,7 +28,7 @@ setup(
             'picking_node = albaro.picking_node:main'
             'wakeup_word_node = albaro.wakeup_word_node:main',
             'detect_shelves_node = albaro.detect_shelves_node:main',
-            'picking_depth = albaro.pick_place_depth:main'
+            'picking_depth = albaro.pick_place_depth:main',
         ],
     },
 )

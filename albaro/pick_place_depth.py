@@ -92,21 +92,37 @@ class SmartStoreNode(Node):
         self.last_depth_frame = self.bridge.imgmsg_to_cv2(msg, '16UC1')
 
     def inventory_callback(self, msg):
-        """재고 정보(JSON)를 파싱하여 0개인 품목을 주문 큐에 추가"""
-        if self.is_robot_busy or len(self.order_queue) > 0:
+        if self.is_robot_busy:
             return
-        try:
-            # JSON 파싱 (작은따옴표 문제 해결을 위해 replace 사용)
+        elif len(self.order_queue) == 0:
             data_str = msg.data.replace("'", '"')
             inventory = json.loads(data_str)
+            
             for item, count in inventory.items():
                 if count == 0 and item in self.routes:
                     self.get_logger().info(f"재고 부족 감지! {item}을 3개 보충합니다.")
                     for _ in range(3):
                         self.order_queue.append(item)
-                    break 
-        except Exception as e:
-            pass
+        else:
+            threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start()
+
+        # """재고 정보(JSON)를 파싱하여 0개인 품목을 주문 큐에 추가"""
+        # if self.is_robot_busy or len(self.order_queue) > 0:
+        #     return
+        # try:
+        #     # JSON 파싱 (작은따옴표 문제 해결을 위해 replace 사용)
+        #     data_str = msg.data.replace("'", '"')
+        #     inventory = json.loads(data_str)
+        #     for item, count in inventory.items():
+        #         if count == 0 and item in self.routes:
+        #             self.get_logger().info(f"재고 부족 감지! {item}을 3개 보충합니다.")
+        #             for _ in range(3):
+        #                 self.order_queue.append(item)
+        #                 threading.Thread(target=self.delivery_process, args=(item,), daemon=True).start()
+        #             break 
+             
+        # except Exception as e:
+        #     pass
 
     def order_callback(self, msg):
         try:
@@ -143,6 +159,8 @@ class SmartStoreNode(Node):
     def delivery_process(self, label):
         self.get_logger().info(f"--- [스레드 시작] 타겟: {label} ---")
         try:
+            self.is_robot_busy = True
+            
             # 1. 경로 존재 여부 확인
             if label not in self.routes:
                 self.get_logger().error(f"경로 데이터에 '{label}'이 없습니다!")
