@@ -191,30 +191,28 @@ class SmartStoreNode(Node):
         """Depth 기반 정밀 피킹"""
         try:
             z_mm = self.last_depth_frame[cy, cx]
-            if z_mm <= 0: 
+            if z_mm > 0: 
                 self.get_logger().error("Depth 값이 0입니다. 피킹을 취소합니다.")
-                return
+                # 카메라 좌표 계산
+                cam_x = (cx - self.intrinsics["ppx"]) * z_mm / self.intrinsics["fx"]
+                cam_y = (cy - self.intrinsics["ppy"]) * z_mm / self.intrinsics["fy"]
+                cam_coords = np.array([cam_x, cam_y, z_mm, 1.0])
 
-            # 카메라 좌표 계산
-            cam_x = (cx - self.intrinsics["ppx"]) * z_mm / self.intrinsics["fx"]
-            cam_y = (cy - self.intrinsics["ppy"]) * z_mm / self.intrinsics["fy"]
-            cam_coords = np.array([cam_x, cam_y, z_mm, 1.0])
-
-            # 베이스 좌표 변환
-            curr_pos = self.get_current_posx()[0]
-            R = Rotation.from_euler("ZYZ", curr_pos[3:], degrees=True).as_matrix()
-            T = np.eye(4); T[:3,:3]=R; T[:3,3]=curr_pos[:3]
-            target_pos = (T @ self.gripper2cam @ cam_coords)[:3]
+                # 베이스 좌표 변환
+                curr_pos = self.get_current_posx()[0]
+                R = Rotation.from_euler("ZYZ", curr_pos[3:], degrees=True).as_matrix()
+                T = np.eye(4); T[:3,:3]=R; T[:3,3]=curr_pos[:3]
+                target_pos = (T @ self.gripper2cam @ cam_coords)[:3]
 
 
-            pick = self.posx([target_pos[0]+70, curr_pos[1], curr_pos[2], curr_pos[3], curr_pos[4], curr_pos[5]])
+                pick = self.posx([target_pos[0]+70, curr_pos[1], curr_pos[2], curr_pos[3], curr_pos[4], curr_pos[5]])
 
-            self.get_logger().info(f"상세 좌표: {target_pos}")
-            
+                self.get_logger().info(f"상세 좌표: {target_pos}")
+                
 
 
-            self.get_logger().info("2. Pick 지점(L) 이동") 
-            self.movel(pick, vel=20, acc=20)
+                self.get_logger().info("2. Pick 지점(L) 이동") 
+                self.movel(pick, vel=20, acc=20)
 
             
             self.wait(0.5)
@@ -223,7 +221,7 @@ class SmartStoreNode(Node):
             
             self.get_logger().info("4. 물체 들어올리기(L)")
             # self.movel(approach, vel=40, acc=40)
-            self.movel(self.posx(0, 0, 50, 0, 0, 0),vel=60, acc=60, mod=1)
+            self.movel(self.posx(0, 0, 100, 0, 0, 0),vel=60, acc=60, mod=1)
             
             self.get_logger().info("5. 중간 안전지대 이동(J)")
             # 관절 포즈는 movej로 이동
@@ -239,19 +237,33 @@ class SmartStoreNode(Node):
 
     # --- 매대별 내려놓기 동작 ---
     def stand1(self):
-
         self.movej(self.posj(-30.25, 38.45, 23.09, -11.04, 110.93, 53.81), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-32.28, 36.26, 40.68, -10.03, 95.72, 54.79), vel=60, acc=60, ra=1)
         self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
         self.movel(self.posx(0, 0, 30, 0, 0, 0),vel=60, acc=60, mod=1)
         self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
         
 
     def stand2(self):
-        # stand2, 3, 4는 좌표에 맞춰 구현
-        self.stand1()
+        self.movej(self.posj(-41.43, 13.20, 59.31, -8.71, 98.39, 45.49), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-43.94, 13.08, 74.78, -8.45, 83.20, 45.33), vel=60, acc=60, ra=1)
+        self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
+        self.movej(self.posj(-41.43, 13.20, 59.31, -8.71, 98.39, 45.49), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
 
-    def stand3(self): self.stand1()
-    def stand4(self): self.stand1()
+    def stand3(self):
+        self.movej(self.posj(-61.71, -2.94, 75.61, -5.01, 95.74, 26.26), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-64.04, -2.29, 89.98, -4.85, 81.00, 25.28), vel=60, acc=60, ra=1)
+        self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
+        self.movej(self.posj(-61.71, -2.94, 75.61, -5.01, 95.74, 26.26), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
+    
+    def stand4(self):
+        self.movej(self.posj(-92.90, -8.97, 82.16, 1.34, 94.19, -3.99), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-94.38, -6.91, 95.10, 1.50, 79.83, -5.67), vel=60, acc=60, ra=1)
+        self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
+        self.movej(self.posj(-92.90, -8.97, 82.16, 1.34, 94.19, -3.99), vel=60, acc=60, ra=1)
+        self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
 
 # --- 메인 함수 (에러 해결용 초기화 구조) ---
 def main(args=None):
