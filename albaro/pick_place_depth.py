@@ -174,7 +174,7 @@ class SmartStoreNode(Node):
 
             # 3. 객체 인식
             self.get_logger().info(f"YOLO 인식 시도: {label}")
-            results = self.model.predict(source=self.last_frame, conf=0.5, verbose=False)
+            results = self.model.predict(source=self.last_frame, conf=0.75, verbose=False)
             
             target_box = None
             for box in results[0].boxes:
@@ -185,19 +185,28 @@ class SmartStoreNode(Node):
             if target_box is not None:
                 x1, y1, x2, y2 = map(int, target_box.xyxy[0])
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+                # 박스 그리기
+                cv2.rectangle(self.last_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # 클래스 및 확률 표시
+                cv2.putText(self.last_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
                 self.get_logger().info(f"좌표 감지 ({cx}, {cy}), 피킹 실행")
                 self.get_logger().info(f"")
                 self.execute_vision_pick(cx, cy)
                 
                 self.get_logger().info("매대로 이동 중...")
                 self.routes[label]['stand']()
+
+                # 4. 완료 후 큐에서 제거        
+                self.order_queue.pop(0)
+                self.get_logger().info(f"--- [스레드 종료] {label} 처리 완료 ---")
             else:
                 self.get_logger().warn(f"화면에서 {label}을 찾지 못했습니다.")
-
-            # 4. 완료 후 큐에서 제거        
-            self.order_queue.pop(0)
-            self.get_logger().info(f"--- [스레드 종료] {label} 처리 완료 ---")
-
+                self.order_queue = [word for word in self.order_queue if word != label]
+                
+                self.movel(self.posx(0, 0, 300, 0, 0, 0),vel=60, acc=60, mod=1)
+                self.movej(self.posj(0, 0, 90, 0, 90, 0), vel=30, acc=30,  ra=1)
 
         except Exception as e:
             self.get_logger().error(f"delivery_process 실행 중 치명적 오류: {e}")
