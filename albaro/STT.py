@@ -4,19 +4,18 @@ import scipy.io.wavfile as wav
 import tempfile
 import os
 from pathlib import Path
-
 from dotenv import load_dotenv
 
 
 # =====================================================
-# 1. .env 로딩 (파일 기준, 경로 문제 방지)
+# 1. .env 로딩
 # =====================================================
-BASE_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트
-load_dotenv(BASE_DIR / ".env")
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(ENV_PATH, override=True)
 
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise RuntimeError("OPENAI_API_KEY not loaded. Check .env path and content.")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not found")
 
 
 # =====================================================
@@ -25,8 +24,8 @@ if not openai_api_key:
 class STT:
     def __init__(self, openai_api_key):
         self.client = OpenAI(api_key=openai_api_key)
-        self.duration = 5       # seconds
-        self.samplerate = 16000 # Whisper 권장 샘플레이트
+        self.duration = 5
+        self.samplerate = 16000
 
     def speech2text(self):
         print("음성 녹음을 시작합니다. (5초 동안 말해주세요)")
@@ -50,22 +49,22 @@ class STT:
                     file=f
                 )
 
-            wav_path = temp_wav.name  # ✅ 추가
+            wav_path = temp_wav.name
 
         text = transcript.text.strip()
         if not text:
-            print("STT 결과 없음 (침묵 또는 인식 실패)")
-            return None, wav_path     # ✅ 기존 return 확장
+            print("STT 결과 없음")
+            return None, wav_path
 
         print("STT 결과:", text)
-        return text, wav_path         # ✅ 기존 return 확장
+        return text, wav_path
 
 
 # =====================================================
 # 3. 단독 실행 테스트
 # =====================================================
 if __name__ == "__main__":
-    stt = STT(openai_api_key)
+    stt = STT(OPENAI_API_KEY)
     text, wav_path = stt.speech2text()
     print("최종 반환:", text)
     print("wav 경로:", wav_path)

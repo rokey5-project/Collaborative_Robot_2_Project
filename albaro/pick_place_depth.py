@@ -82,14 +82,21 @@ class SmartStoreNode(Node):
 
         # 5. ROS2 구독 및 퍼블리셔
         self.inventory_sub = self.create_subscription(String, '/detect_info', self.inventory_callback, 10)
-        self.order_sub = self.create_subscription(String, '/order_item', self.order_callback, 10)
         self.img_sub = self.create_subscription(Image, '/camera/camera/color/image_raw', self.vision_callback, 10)
         self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
-
+        self.stt_sub = self.create_subscription(String, '/order_item', self.stt_callback, 10)
 
     # --- 콜백 함수부 ---
     def depth_callback(self, msg):
         self.last_depth_frame = self.bridge.imgmsg_to_cv2(msg, '16UC1')
+
+    def stt_callback(self, msg):
+        data_str = msg.data.replace("'", '"')
+        inventory = json.loads(data_str)
+
+        for item, count in inventory.items():
+            for _ in range(count):
+                self.order_queue.append(item)
 
     def inventory_callback(self, msg):
         if self.is_robot_busy:
@@ -105,38 +112,6 @@ class SmartStoreNode(Node):
                         self.order_queue.append(item)
         else:
             threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start()
-
-        # """재고 정보(JSON)를 파싱하여 0개인 품목을 주문 큐에 추가"""
-        # if self.is_robot_busy or len(self.order_queue) > 0:
-        #     return
-        # try:
-        #     # JSON 파싱 (작은따옴표 문제 해결을 위해 replace 사용)
-        #     data_str = msg.data.replace("'", '"')
-        #     inventory = json.loads(data_str)
-        #     for item, count in inventory.items():
-        #         if count == 0 and item in self.routes:
-        #             self.get_logger().info(f"재고 부족 감지! {item}을 3개 보충합니다.")
-        #             for _ in range(3):
-        #                 self.order_queue.append(item)
-        #                 threading.Thread(target=self.delivery_process, args=(item,), daemon=True).start()
-        #             break 
-             
-        # except Exception as e:
-        #     pass
-
-    def order_callback(self, msg):
-        try:
-            order_dict = ast.literal_eval(msg.data)
-            print("order callback")
-            for item, count in order_dict.items():
-                for _ in range(count):
-                    self.order_queue.append(item)
-                print(f"{item, count}")
-            
-            threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start() 
-            
-        except Exception as e:
-            self.get_logger().error(f"주문 파싱 오류: {e}")
 
     def vision_callback(self, msg):
         # print("get topic")
@@ -212,7 +187,6 @@ class SmartStoreNode(Node):
             self.get_logger().error(f"delivery_process 실행 중 치명적 오류: {e}")
         finally:
             self.is_robot_busy = False # 에러가 나더라도 반드시 False로 복구
-
 
     def execute_vision_pick(self, cx, cy):
         """Depth 기반 정밀 피킹"""
