@@ -15,9 +15,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
-# ===============================
-# ENV
-# ===============================
+# env 파일 로드
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(ENV_PATH, override=True)
 
@@ -26,17 +24,14 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not found")
 
 
-# ===============================
-# ROS + Item Check Node
-# ===============================
 class ItemCheckNode(Node):
     def __init__(self):
         super().__init__('item_check_node')
 
-        self.sub_start = self.create_subscription(
+        self.item_check_sub = self.create_subscription(
             Bool,
             '/start_item_check',
-            self.start_cb,
+            self.start_check_item,
             10
         )
 
@@ -54,14 +49,7 @@ class ItemCheckNode(Node):
         self.start_time = None
         self.TIMEOUT_SEC = 7.0
 
-        self.get_logger().info("ItemCheck node initialized")
-
-    def start_cb(self, msg: Bool):
-        if msg.data and not self.active:
-            self.active = True
-            self.cass_active = False
-            self.start_time = time.time()
-            self.tts("물품을 올려주세요.")
+        self.get_logger().info("아이템 확인 진해중...")
 
     def tts(self, text: str):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
@@ -81,6 +69,13 @@ class ItemCheckNode(Node):
         )
 
         os.remove(audio_path)
+
+    def start_check_item(self, msg: Bool):
+        if msg.data and not self.active:
+            self.active = True
+            self.cass_active = False
+            self.start_time = time.time()
+            self.tts("물품을 올려주세요.")
 
     def cass_detected_once(self):
         self.tts("인증이 필요한 상품입니다.")
