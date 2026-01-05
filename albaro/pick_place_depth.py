@@ -86,6 +86,11 @@ class SmartStoreNode(Node):
         self.depth_sub = self.create_subscription(Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
         self.stt_sub = self.create_subscription(String, '/order_item', self.stt_callback, 10)
 
+        # -----------------------------
+        # (추가) StateManager로 완료 신호 보내기
+        # -----------------------------
+        self.task_done_pub = self.create_publisher(String, '/task_done', 10)
+
     # --- 콜백 함수부 ---
     def depth_callback(self, msg):
         self.last_depth_frame = self.bridge.imgmsg_to_cv2(msg, '16UC1')
@@ -176,6 +181,15 @@ class SmartStoreNode(Node):
                 # 4. 완료 후 큐에서 제거        
                 self.order_queue.pop(0)
                 self.get_logger().info(f"--- [스레드 종료] {label} 처리 완료 ---")
+
+                # -----------------------------
+                # (추가) pick 작업 1건 완료 신호
+                # -----------------------------
+                done_msg = String()
+                done_msg.data = "PICK_DONE"
+                self.task_done_pub.publish(done_msg)
+                self.get_logger().info("→ /task_done published: PICK_DONE")
+
             else:
                 self.get_logger().warn(f"화면에서 {label}을 찾지 못했습니다.")
                 self.order_queue = [word for word in self.order_queue if word != label]
@@ -183,8 +197,25 @@ class SmartStoreNode(Node):
                 self.movel(self.posx(0, 0, 300, 0, 0, 0),vel=60, acc=60, mod=1)
                 self.movej(self.posj(0, 0, 90, 0, 90, 0), vel=30, acc=30,  ra=1)
 
+                # -----------------------------
+                # (추가) 실패/스킵이어도 사이클 종료로 처리할지 신호
+                # -----------------------------
+                done_msg = String()
+                done_msg.data = "PICK_DONE"
+                self.task_done_pub.publish(done_msg)
+                self.get_logger().info("→ /task_done published: PICK_DONE (not found)")
+
         except Exception as e:
             self.get_logger().error(f"delivery_process 실행 중 치명적 오류: {e}")
+
+            # -----------------------------
+            # (추가) 예외가 나도 state_manager가 영원히 busy로 안 남게 종료 신호
+            # -----------------------------
+            done_msg = String()
+            done_msg.data = "PICK_DONE"
+            self.task_done_pub.publish(done_msg)
+            self.get_logger().info("→ /task_done published: PICK_DONE (exception)")
+
         finally:
             self.is_robot_busy = False # 에러가 나더라도 반드시 False로 복구
 

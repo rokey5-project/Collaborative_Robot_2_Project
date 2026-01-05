@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String   # 🔥 (추가) String
 from openai import OpenAI
 
 
@@ -54,6 +54,13 @@ class FaceAgeNode(Node):
         )
 
         self.active = False
+
+        # 🔥 (추가) calc 종료 신호 퍼블리셔
+        self.calc_done_pub = self.create_publisher(
+            String,
+            "/task_done",
+            10
+        )
 
         # OpenAI
         self.client = OpenAI(api_key=OPENAI_API_KEY)
@@ -183,16 +190,33 @@ class FaceAgeNode(Node):
                 else:
                     track["history"].append("adult")
 
+                # ===============================
                 # 판정
+                # ===============================
                 if len(track["history"]) == 3 and not track["decided"]:
+
+                    # ❌ 미성년자
                     if track["history"].count("minor") >= 2:
                         self.tts_queue.put("미성년자는 구매할 수 없습니다.")
+
+                        done_msg = String()
+                        done_msg.data = "CALC_DONE"
+                        self.calc_done_pub.publish(done_msg)
+                        self.get_logger().info("→ /task_done published: CALC_DONE (minor)")
+
                         track["decided"] = True
                         self.active = False
                         break
 
+                    # ✅ 성인
                     if track["history"].count("adult") >= 2:
                         self.tts_queue.put("감사합니다.")
+
+                        done_msg = String()
+                        done_msg.data = "CALC_DONE"
+                        self.calc_done_pub.publish(done_msg)
+                        self.get_logger().info("→ /task_done published: CALC_DONE (adult)")
+
                         track["decided"] = True
                         self.active = False
                         break

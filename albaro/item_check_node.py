@@ -9,7 +9,7 @@ from ultralytics import YOLO
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -41,6 +41,13 @@ class ItemCheckNode(Node):
             10
         )
 
+        # 🔥 calc 완료 신호
+        self.calc_done_pub = self.create_publisher(
+            String,
+            '/task_done',
+            10
+        )
+
         self.client = OpenAI(api_key=OPENAI_API_KEY)
 
         self.active = False
@@ -49,7 +56,10 @@ class ItemCheckNode(Node):
         self.start_time = None
         self.TIMEOUT_SEC = 7.0
 
-        self.get_logger().info("아이템 확인 진해중...")
+        # 🔥 FaceAge로 넘어갈 때 카메라 종료용 플래그 (추가)
+        self.shutdown_camera = False
+
+        self.get_logger().info("아이템 확인 진행중...")
 
     def tts(self, text: str):
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
@@ -74,6 +84,7 @@ class ItemCheckNode(Node):
         if msg.data and not self.active:
             self.active = True
             self.cass_active = False
+            self.shutdown_camera = False
             self.start_time = time.time()
             self.tts("물품을 올려주세요.")
 
@@ -86,9 +97,17 @@ class ItemCheckNode(Node):
 
         self.active = False
 
+        # 🔥 FaceAge로 넘기고 ItemCheck 카메라 종료
+        self.shutdown_camera = True
+
     def timeout_no_cass(self):
         self.tts("감사합니다.")
         self.active = False
+
+        done_msg = String()
+        done_msg.data = "CALC_DONE"
+        self.calc_done_pub.publish(done_msg)
+        self.get_logger().info("→ /task_done published: CALC_DONE")
 
 
 # ===============================
@@ -109,23 +128,19 @@ def main():
     while rclpy.ok():
         rclpy.spin_once(ros_node, timeout_sec=0.01)
 
+        # 🔥 FaceAge로 넘어가는 순간 즉시 카메라 종료
+        if ros_node.shutdown_camera:
+            break
+
         ret, frame = cap.read()
         if not ret:
             break
-
-        # -----------------------------
-        # 🔥 active일 때만 감지 로직
-        # -----------------------------
-        #if ros_node.active:
-        # if time.time() - ros_node.start_time >= ros_node.TIMEOUT_SEC:
-        #     ros_node.timeout_no_cass()
 
         results = model.predict(source=frame, conf=0.7, verbose=False)
         result = results[0]
         boxes = result.boxes
         classes = result.names
 
-    
         cass_found = False
 
         for box in boxes:
@@ -149,12 +164,10 @@ def main():
             ros_node.cass_active = True
             ros_node.cass_detected_once()
 
-        if not cass_found:
-            ros_node.cass_active = False
+        if not cass_found and ros_node.active:
+            if time.time() - ros_node.start_time >= ros_node.TIMEOUT_SEC:
+                ros_node.timeout_no_cass()
 
-        # -----------------------------
-        # ✅ imshow는 항상 실행
-        # -----------------------------
         cv2.imshow("Item Check", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

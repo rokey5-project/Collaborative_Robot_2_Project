@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+from glob import glob
+import os
 
 package_name = 'albaro'
 
@@ -7,9 +9,18 @@ setup(
     version='0.0.0',
     packages=find_packages(exclude=['test']),
     data_files=[
+        # ament index
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
+
+        # package.xml
         ('share/' + package_name, ['package.xml']),
+
+        # 🔥 launch 파일 설치 (추가된 부분)
+        (os.path.join('share', package_name, 'launch'),
+         glob('launch/*.py')),
+        ('share/albaro/models', glob('models/*.pt')),
+        ('share/albaro/models', glob('models/*.tflite')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,10 +36,13 @@ setup(
     entry_points={
         'console_scripts': [
             'face_age_node = albaro.face_age_node:main',
-            'picking_node = albaro.picking_node:main'
+            'picking_node = albaro.picking_node:main',
             'wakeup_word_node = albaro.wakeup_word_node:main',
             'detect_shelves_node = albaro.detect_shelves_node:main',
             'picking_depth = albaro.pick_place_depth:main',
+            'manager = albaro.state_manager_node:main',
+            'item = albaro.item_check_node:main',
+            'orc = albaro.orc_node:main',
         ],
     },
 )

@@ -1,12 +1,11 @@
 import os
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from dotenv import load_dotenv
 
 from STT import STT
 from keyword_extraction import ExtractKeyword
-from std_msgs.msg import Bool
 
 # .env 파일 로드
 load_dotenv()
@@ -14,25 +13,31 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY not loaded. Check .env path and content.")
 
+
 class OrderOrchestrator(Node):
     """
     역할:
-    - STT로 음성 입력 수집
-    - LLM 키워드 추출
-    - {'cocacola': 2, 'sprite': 1} 형태로
-      /order_item 토픽 publish
+    - /start_orc 수신
+    - STT → LLM 키워드 추출
+    - /order_item publish
+    - 로봇 동작 시작 신호를 StateManager에 전달
     """
 
     def __init__(self):
         super().__init__("order_orchestrator")
 
         # STT / Keyword Extractor
-        self.stt = STT(OPENAI_API_KEY)  # openai_api_key를 STT에 전달
+        self.stt = STT(OPENAI_API_KEY)
         self.extractor = ExtractKeyword()
 
-        # pick_place_depth.py 쪽에서 받을 토픽
+        # Publisher
         self.order_pub = self.create_publisher(String, "/order_item", 10)
-        self.wakeup_sub = self.create_subscription(Bool, "/start_orc", self.orc_callback, 10)
+        self.robot_start_pub = self.create_publisher(Bool, "/robot_start", 10)
+
+        # Subscriber
+        self.wakeup_sub = self.create_subscription(
+            Bool, "/start_orc", self.orc_callback, 10
+        )
 
         self.get_logger().info("OrderOrchestrator node started")
 
@@ -53,26 +58,27 @@ class OrderOrchestrator(Node):
                 return
 
             items, counts = result
-
-            # SmartStoreNode / OrderListenerNode가 기대하는 형태
-            # 예: {'cocacola': 2, 'sprite': 1}
             order_dict = dict(zip(items, counts))
 
-            msg = String()
-            msg.data = str(order_dict)   # ast.literal_eval 대응
-            self.order_pub.publish(msg)
+            # 주문 publish
+            order_msg = String()
+            order_msg.data = str(order_dict)
+            self.order_pub.publish(order_msg)
+            self.get_logger().info(f"주문 전송: {order_msg.data}")
 
-            self.get_logger().info(f"주문 전송: {msg.data}")
+            # 🔥 로봇 시작 신호 (StateManager → ROBOT_BUSY)
+            self.robot_start_pub.publish(Bool(data=True))
+            self.get_logger().info("robot_start signal sent")
 
         finally:
             if wav_path and os.path.exists(wav_path):
                 os.remove(wav_path)
                 self.get_logger().info(f"임시 wav 삭제: {wav_path}")
 
-    def orc_callback(self, msg):
+    def orc_callback(self, msg: Bool):
         if msg.data:
+            self.get_logger().info("start_orc received")
             self.run_once()
-
 
 
 def main(args=None):
