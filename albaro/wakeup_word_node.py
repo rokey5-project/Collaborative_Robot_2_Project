@@ -2,134 +2,179 @@ import time
 import numpy as np
 import sounddevice as sd
 import tensorflow as tf
-import subprocess
-import os
 
-# ===============================
-# 설정값 (네 환경 기준)
-# ===============================
-MODEL_PATH = "trained.tflite"      # float32 wakeword 모델
-SAMPLE_RATE = 16000
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
 
-MODEL_SAMPLES = 3960               # 모델 입력 길이
-BLOCK_SAMPLES = 1600               # 0.1초 단위
-
-ENERGY_THRESHOLD = 0.02            # RMS 에너지 컷
-WAKE_THRESHOLD = 0.95              # wake 확률
-DETECT_COUNT_REQUIRED = 3          # 연속 n회
-
-WAKE_INDEX = 1                     # wake 클래스 인덱스
-
-# ===============================
-# 실행할 코드 경로 (★ 반드시 실제 경로)
-# ===============================
-PYTHON_EXEC = "/bin/python3"
-FACE_NODE_PATH = "/home/rokey/albaro/albaro/face_age_node.py"
+from python_speech_features import mfcc
 
 
-class Wakeup:
-    def __init__(self, model_path: str):
-        # -------------------------------
+class WakeupNode(Node):
+    def __init__(self):
+        super().__init__("wakeup_node")
+
+        # 🔥 StateManager로 intent만 전달
+        self.intent_pub = self.create_publisher(
+            String, "/wakeup_intent", 10
+        )
+
+        # -----------------------------
         # TFLite 모델 로드
-        # -------------------------------
-        self.interpreter = tf.lite.Interpreter(model_path=model_path)
+        # -----------------------------
+        self.interpreter = tf.lite.Interpreter(
+            model_path="/home/rokey/albaro/albaro/trained.tflite"
+        )
         self.interpreter.allocate_tensors()
 
         self.input_details = self.interpreter.get_input_details()[0]
         self.output_details = self.interpreter.get_output_details()[0]
+        self.expected_feat_len = int(self.input_details["shape"][1])
 
-        print("[INFO] Model input :", self.input_details["shape"], self.input_details["dtype"])
-        print("[INFO] Model output:", self.output_details["shape"])
+        # -----------------------------
+        # 오디오 설정
+        # -----------------------------
+        self.SR = 16000
+        self.BLOCK = 1600          # 100ms
+        self.ONSET_SEC = 0.4      # 발화 초반만 캡처
+        self.ONSET_SAMPLES = int(self.SR * self.ONSET_SEC)
 
-        # -------------------------------
-        # 오디오 링버퍼
-        # -------------------------------
-        self.buf = np.zeros(MODEL_SAMPLES, dtype=np.float32)
-        self.hit_count = 0
+        self.audio_buf = np.zeros(self.ONSET_SAMPLES, dtype=np.float32)
+        self.write_idx = 0
+        self.capturing = False
 
-        # -------------------------------
-        # 실행 프로세스 핸들
-        # -------------------------------
-        self.face_proc = None
+        # -----------------------------
+        # 상태 / 파라미터
+        # -----------------------------
+        self.FRAME_RMS_TH = 0.020
+        self.last_pub_time = 0.0
+        self.PUBLISH_COOLDOWN = 3.0
 
-    def _push_audio(self, audio: np.ndarray):
-        n = len(audio)
-        if n >= MODEL_SAMPLES:
-            self.buf[:] = audio[-MODEL_SAMPLES:]
+        # 🔥 분기 기준
+        
+        self.CALC_STRONG_TH = 0.95
+        self.CALC_WEAK_TH = 0.70
+
+        self.get_logger().info(
+            f"Wakeup node started | onset_capture={self.ONSET_SEC}s"
+        )
+
+        # -----------------------------
+        # 마이크 스트림
+        # -----------------------------
+        self.stream = sd.InputStream(
+            samplerate=self.SR,
+            channels=1,
+            dtype="float32",
+            blocksize=self.BLOCK,
+            callback=self.audio_cb,
+        )
+        self.stream.start()
+
+    # -----------------------------
+    # MFCC (Edge Impulse 호환)
+    # -----------------------------
+    def extract_mfcc(self, audio):
+        feat = mfcc(
+            signal=audio,
+            samplerate=self.SR,
+            winlen=0.025,
+            winstep=0.01,
+            numcep=13,
+            nfilt=32,
+            nfft=512,
+            preemph=0.98,
+            appendEnergy=False,
+        ).flatten().astype(np.float32)
+
+        if len(feat) < self.expected_feat_len:
+            feat = np.pad(feat, (0, self.expected_feat_len - len(feat)))
         else:
-            self.buf[:-n] = self.buf[n:]
-            self.buf[-n:] = audio
+            feat = feat[: self.expected_feat_len]
 
-    def predict_probs(self) -> np.ndarray:
-        x = self.buf.reshape(self.input_details["shape"]).astype(np.float32)
+        return feat.reshape(1, -1)
+
+    # -----------------------------
+    # 추론
+    # -----------------------------
+    def predict(self, audio):
+        x = self.extract_mfcc(audio)
         self.interpreter.set_tensor(self.input_details["index"], x)
         self.interpreter.invoke()
         return self.interpreter.get_tensor(self.output_details["index"])[0]
 
-    def _launch_face_node(self):
-        if not os.path.exists(FACE_NODE_PATH):
-            print("[ERROR] face_age_node.py 경로가 존재하지 않음")
+    # -----------------------------
+    # 판단 + intent publish
+    # -----------------------------
+    def decide_and_publish(self, probs):
+        now = time.time()
+
+        calc = float(probs[0])
+        pick = float(probs[2])
+
+        self.get_logger().info(
+            f"[ONSET CONF] calc={calc:.2f}, pick={pick:.2f}"
+        )
+
+        if now - self.last_pub_time < self.PUBLISH_COOLDOWN:
             return
 
-        if self.face_proc is None or self.face_proc.poll() is not None:
-            print("[INFO] Launching face age node...")
-            self.face_proc = subprocess.Popen([
-                PYTHON_EXEC,
-                FACE_NODE_PATH
-            ])
-        else:
-            print("[INFO] Face node already running")
+        msg = String()
 
-    def run(self):
-        print("[INFO] Wake word listening started")
+        # 🧮 계산
+        if calc >= self.CALC_STRONG_TH:
+            msg.data = "calc"
+            self.intent_pub.publish(msg)
+            self.get_logger().info("→ INTENT: calc")
+            self.last_pub_time = now
+            return
 
-        def callback(indata, frames, time_info, status):
-            if status:
+        # 📦 정리
+        if calc <= self.CALC_WEAK_TH:
+            msg.data = "pick"
+            self.intent_pub.publish(msg)
+            self.get_logger().info("→ INTENT: pick")
+            self.last_pub_time = now
+            return
+
+        self.get_logger().info("⚠️ ambiguous ignored")
+
+    # -----------------------------
+    # 오디오 콜백
+    # -----------------------------
+    def audio_cb(self, indata, frames, time_info, status):
+        audio = indata[:, 0]
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+
+        # 발화 시작 감지
+        if not self.capturing:
+            if rms < self.FRAME_RMS_TH:
                 return
+            self.capturing = True
+            self.write_idx = 0
 
-            audio = indata[:, 0].astype(np.float32)
+        # 버퍼 채우기
+        remain = self.ONSET_SAMPLES - self.write_idx
+        n = min(len(audio), remain)
+        self.audio_buf[self.write_idx:self.write_idx + n] = audio[:n]
+        self.write_idx += n
 
-            # 1️⃣ RMS 에너지 체크
-            rms = np.sqrt(np.mean(audio ** 2))
-            if rms < ENERGY_THRESHOLD:
-                self.hit_count = 0
-                return
+        # 캡처 완료 → 추론
+        if self.write_idx >= self.ONSET_SAMPLES:
+            probs = self.predict(self.audio_buf.copy())
+            self.decide_and_publish(probs)
 
-            # 2️⃣ 버퍼 업데이트
-            self._push_audio(audio)
-
-            # 3️⃣ 추론
-            probs = self.predict_probs()
-            conf = float(probs[WAKE_INDEX])
-
-            print(f"rms={rms:.4f}, conf={conf:.3f}, probs={probs}")
-
-            # 4️⃣ 연속 프레임 검증
-            if conf >= WAKE_THRESHOLD:
-                self.hit_count += 1
-            else:
-                self.hit_count = 0
-
-            # 5️⃣ Wake 감지 → 실행
-            if self.hit_count >= DETECT_COUNT_REQUIRED:
-                print("🔥 Wake word detected!")
-                self._launch_face_node()
-                self.hit_count = 0
-
-        with sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="float32",
-            blocksize=BLOCK_SAMPLES,
-            callback=callback,
-        ):
-            while True:
-                time.sleep(0.1)
+            # 리셋
+            self.capturing = False
+            self.write_idx = 0
 
 
 def main():
-    wake = Wakeup(MODEL_PATH)
-    wake.run()
+    rclpy.init()
+    node = WakeupNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -11,12 +11,12 @@ from dotenv import load_dotenv
 # =====================================================
 # 1. .env 로딩 (파일 기준, 경로 문제 방지)
 # =====================================================
-BASE_DIR = Path(__file__).resolve().parents[2]   # 프로젝트 루트
-load_dotenv(BASE_DIR / ".env")
+ENV_PATH = Path(__file__).resolve().parent / ".env"
+load_dotenv(ENV_PATH, override=True)
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
-    raise RuntimeError("OPENAI_API_KEY not loaded. Check .env path and content.")
+    raise RuntimeError("OPENAI_API_KEY not found")
 
 
 # =====================================================

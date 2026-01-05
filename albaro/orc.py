@@ -1,91 +1,91 @@
 import os
-import sqlite3
-from pathlib import Path
-from datetime import datetime
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import String
+from dotenv import load_dotenv
 
 from STT import STT
 from keyword_extraction import ExtractKeyword
-from STT import openai_api_key
+
+# =====================================================
+# .env 로딩 (OPENAI API KEY)
+# =====================================================
+load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY not loaded. Check .env path and content.")
 
 
 # =====================================================
-# DB 설정
+# Orchestrator Node (DB 제거 버전)
 # =====================================================
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "pipeline_logs.db"
+class Orchestrator(Node):
+    """
+    역할:
+    - STT 1회 실행
+    - 키워드 추출
+    - /order_item 토픽으로 결과 전달
+    """
 
+    def __init__(self):
+        super().__init__("orc")
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            stt_text TEXT,
-            items TEXT,
-            counts TEXT,
-            poses TEXT,
-            created_at TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def save_to_db(text, result):
-    items, counts, poses = result
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO logs (stt_text, items, counts, poses, created_at) VALUES (?, ?, ?, ?, ?)",
-        (
-            text,
-            str(items),
-            str(counts),
-            str(poses),
-            datetime.now().isoformat()
-        )
-    )
-    conn.commit()
-    conn.close()
-
-
-# =====================================================
-# Orchestrator
-# =====================================================
-class Orchestrator:
-    def __init__(self, openai_api_key):
-        self.stt = STT(openai_api_key)
+        self.stt = STT(OPENAI_API_KEY)
         self.extractor = ExtractKeyword()
 
+        self.order_pub = self.create_publisher(
+            String,
+            "/order_item",
+            10
+        )
+
+        self.get_logger().info("ORC node ready")
+
     def run_once(self):
+        """
+        음성 → 키워드 → /order_item publish
+        """
         text, wav_path = self.stt.speech2text()
 
         try:
             if not text:
-                print("[ORCH] STT 실패, 종료")
-                return None
+                self.get_logger().warn("STT 실패 또는 무음")
+                return
 
             result = self.extractor.extract_keyword(text)
             if not result:
-                print("[ORCH] 키워드 추출 실패")
-                return None
+                self.get_logger().warn("키워드 추출 실패")
+                return
 
-            save_to_db(text, result)
-            print("[ORCH] DB 저장 완료:", result)
-            return result
+            items, counts = result
+            order_dict = dict(zip(items, counts))
+
+            msg = String()
+            msg.data = str(order_dict)
+
+            self.order_pub.publish(msg)
+            self.get_logger().info(f"/order_item publish: {msg.data}")
 
         finally:
             if wav_path and os.path.exists(wav_path):
                 os.remove(wav_path)
-                print("[ORCH] wav 삭제 완료:", wav_path)
+                self.get_logger().info(f"임시 wav 삭제: {wav_path}")
 
 
 # =====================================================
 # 실행
 # =====================================================
+def main():
+    rclpy.init()
+    node = Orchestrator()
+
+    # orc는 1회 실행 후 끝나는 구조
+    node.run_once()
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 if __name__ == "__main__":
-    init_db()
-    orch = Orchestrator(openai_api_key)
-    orch.run_once()
+    main()

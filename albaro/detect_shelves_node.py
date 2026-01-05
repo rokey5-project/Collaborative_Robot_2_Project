@@ -3,6 +3,7 @@ import rclpy
 from rclpy.node import Node
 from ultralytics import YOLO
 from std_msgs.msg import String
+import json
 
 
 class DetectShelvesNode(Node):

@@ -65,7 +65,7 @@ class FaceAgeTTS:
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         )
 
-        self.cap = cv2.VideoCapture(6)
+        self.cap = cv2.VideoCapture(8)
         if not self.cap.isOpened():
             raise RuntimeError("웹캠을 열 수 없습니다")
 
