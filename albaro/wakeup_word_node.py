@@ -125,7 +125,7 @@ class WakeupNode(Node):
         if calc >= self.CALC_STRONG_TH:
             msg.data = "calc"
             self.intent_pub.publish(msg)
-            self.get_logger().info("→ INTENT: calc")
+            self.get_logger().info("→ INTENT: 계산해주세요")
             self.last_pub_time = now
             return
 
@@ -133,7 +133,7 @@ class WakeupNode(Node):
         if calc <= self.CALC_WEAK_TH:
             msg.data = "pick"
             self.intent_pub.publish(msg)
-            self.get_logger().info("→ INTENT: pick")
+            self.get_logger().info("→ INTENT: 정리해줘")
             self.last_pub_time = now
             return
 

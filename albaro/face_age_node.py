@@ -1,18 +1,16 @@
 import os
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # GUI 백엔드 강제 (가능하면 cv2 import 전에)
-
-from openai import OpenAI
-import cv2
-import time
-import torch
-import threading
-from queue import Queue
-from PIL import Image
-from transformers import AutoImageProcessor, SiglipForImageClassification
 import tempfile
 import subprocess
+import time
+import threading
+from queue import Queue
 from pathlib import Path
+from PIL import Image
+import torch
+from transformers import AutoImageProcessor, SiglipForImageClassification
 from dotenv import load_dotenv
+from openai import OpenAI
+import cv2
 
 
 # =====================================================
@@ -83,6 +81,9 @@ class FaceAgeTTS:
             text = self.tts_queue.get()
             if text is None:
                 break
+
+            # 로그 찍기
+            print(f"TTS 멘트: {text}")  # TTS 멘트 로그 출력
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
                 audio_path = f.name
