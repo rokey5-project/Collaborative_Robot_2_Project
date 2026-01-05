@@ -29,6 +29,7 @@ setup(
             'wakeup_word_node = albaro.wakeup_word_node:main',
             'detect_shelves_node = albaro.detect_shelves_node:main',
             'picking_depth = albaro.pick_place_depth:main',
+            'item_check =albaro.item_check_node:main'
         ],
     },
 )
