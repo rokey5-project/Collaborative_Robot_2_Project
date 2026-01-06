@@ -2,180 +2,162 @@ import time
 import numpy as np
 import sounddevice as sd
 import tensorflow as tf
-
 import rclpy
+import sys
 from rclpy.node import Node
-from std_msgs.msg import String
-
+from std_msgs.msg import String, Bool
 from python_speech_features import mfcc
-
 
 class WakeupNode(Node):
     def __init__(self):
         super().__init__("wakeup_node")
-
-        # 🔥 StateManager로 intent만 전달
-        self.intent_pub = self.create_publisher(
-            String, "/wakeup_intent", 10
-        )
-
-        # -----------------------------
-        # TFLite 모델 로드
-        # -----------------------------
-        self.interpreter = tf.lite.Interpreter(
-            model_path="/home/rokey/albaro/albaro/trained.tflite"
-        )
-        self.interpreter.allocate_tensors()
-
-        self.input_details = self.interpreter.get_input_details()[0]
-        self.output_details = self.interpreter.get_output_details()[0]
-        self.expected_feat_len = int(self.input_details["shape"][1])
-
-        # -----------------------------
-        # 오디오 설정
-        # -----------------------------
-        self.SR = 16000
-        self.BLOCK = 1600          # 100ms
-        self.ONSET_SEC = 0.4      # 발화 초반만 캡처
-        self.ONSET_SAMPLES = int(self.SR * self.ONSET_SEC)
-
-        self.audio_buf = np.zeros(self.ONSET_SAMPLES, dtype=np.float32)
-        self.write_idx = 0
-        self.capturing = False
-
-        # -----------------------------
-        # 상태 / 파라미터
-        # -----------------------------
-        self.FRAME_RMS_TH = 0.020
-        self.last_pub_time = 0.0
-        self.PUBLISH_COOLDOWN = 3.0
-
-        # 🔥 분기 기준
+        self.intent_pub = self.create_publisher(String, "/wakeup_intent", 10)
         
-        self.CALC_STRONG_TH = 0.95
-        self.CALC_WEAK_TH = 0.70
-
-        self.get_logger().info(
-            f"Wakeup node started | onset_capture={self.ONSET_SEC}s"
+        # [수정] 정지 대신 노드 종료(Kill) 신호를 구독합니다.
+        self.kill_sub = self.create_subscription(
+            Bool, "/kill_wakeup", self.kill_cb, 10
         )
 
-        # -----------------------------
-        # 마이크 스트림
-        # -----------------------------
-        self.stream = sd.InputStream(
-            samplerate=self.SR,
-            channels=1,
-            dtype="float32",
-            blocksize=self.BLOCK,
-            callback=self.audio_cb,
-        )
-        self.stream.start()
+        try:
+            # 모델 경로를 환경에 맞게 확인하세요.
+            self.interpreter = tf.lite.Interpreter(model_path="/home/rokey/albaro/albaro/train_end.tflite")
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()[0]
+            self.input_shape = self.input_details["shape"]
+            self.expected_feat_len = np.prod(self.input_shape)
+        except Exception as e:
+            self.get_logger().error(f"Model Load Error: {e}")
+            return
 
-    # -----------------------------
-    # MFCC (Edge Impulse 호환)
-    # -----------------------------
+        self.SR = 16000
+        self.BLOCK = 1600  
+        self.audio_buf = np.zeros(self.SR, dtype=np.float32)
+        self.LABELS = ["calc", "noise", "pick", "silence"]
+        
+        self.last_pub_time = 0.0
+        self.NORM_WIN_SIZE = 101 
+        self.VOLUME_TH = 0.12      
+        self.PUB_COOLDOWN = 1.5    
+        self.calc_counter = 0      
+        self.CALC_REQUIRED = 2     
+
+        self.get_logger().info("--- Wakeup Node: Active (Kill Signal Mode) ---")
+
+        # 마이크 스트림 시작
+        self.start_mic_stream()
+
+    def start_mic_stream(self):
+        try:
+            self.stream = sd.InputStream(
+                samplerate=self.SR, channels=1, dtype="float32",
+                blocksize=self.BLOCK, callback=self.audio_cb
+            )
+            self.stream.start()
+            self.get_logger().info("🎤 마이크 감지 중...")
+        except Exception as e:
+            self.get_logger().error(f"마이크 시작 실패: {e}")
+
+    def kill_cb(self, msg: Bool):
+        """종료 신호를 받으면 자원을 해제하고 프로세스를 종료합니다."""
+        if msg.data:
+            self.get_logger().warn("🛑 [KILL] ORC 가동을 위해 노드를 종료하고 자원을 반환합니다.")
+            if hasattr(self, 'stream'):
+                self.stream.stop()
+                self.stream.close()
+            
+            # ROS2 노드 및 Python 프로세스 종료
+            # 런치 파일의 respawn=True 설정에 의해 나중에 자동으로 살아납니다.
+            rclpy.shutdown()
+            sys.exit(0)
+
+    def get_rms(self, audio):
+        return np.sqrt(np.mean(np.square(audio)))
+
+    def edge_impulse_normalize(self, feat):
+        feat_normalized = np.empty_like(feat)
+        actual_win = min(self.NORM_WIN_SIZE, feat.shape[0])
+        for i in range(feat.shape[1]):
+            column = feat[:, i]
+            mean = np.convolve(column, np.ones(actual_win)/actual_win, mode='same')
+            feat_normalized[:, i] = column - mean
+        return feat_normalized
+
     def extract_mfcc(self, audio):
-        feat = mfcc(
-            signal=audio,
-            samplerate=self.SR,
-            winlen=0.025,
-            winstep=0.01,
-            numcep=13,
-            nfilt=32,
-            nfft=512,
-            preemph=0.98,
-            appendEnergy=False,
-        ).flatten().astype(np.float32)
-
+        feat = mfcc(signal=audio, samplerate=self.SR, winlen=0.025, winstep=0.01,
+                    numcep=20, nfilt=40, nfft=512, preemph=0.97, appendEnergy=False)
+        feat = self.edge_impulse_normalize(feat)
+        feat = feat.astype(np.float32).flatten()
         if len(feat) < self.expected_feat_len:
             feat = np.pad(feat, (0, self.expected_feat_len - len(feat)))
         else:
-            feat = feat[: self.expected_feat_len]
+            feat = feat[:self.expected_feat_len]
+        return feat.reshape(self.input_shape)
 
-        return feat.reshape(1, -1)
-
-    # -----------------------------
-    # 추론
-    # -----------------------------
-    def predict(self, audio):
-        x = self.extract_mfcc(audio)
-        self.interpreter.set_tensor(self.input_details["index"], x)
-        self.interpreter.invoke()
-        return self.interpreter.get_tensor(self.output_details["index"])[0]
-
-    # -----------------------------
-    # 판단 + intent publish
-    # -----------------------------
-    def decide_and_publish(self, probs):
-        now = time.time()
-
-        calc = float(probs[0])
-        pick = float(probs[2])
-
-        self.get_logger().info(
-            f"[ONSET CONF] calc={calc:.2f}, pick={pick:.2f}"
-        )
-
-        if now - self.last_pub_time < self.PUBLISH_COOLDOWN:
-            return
-
-        msg = String()
-
-        # 🧮 계산
-        if calc >= self.CALC_STRONG_TH:
-            msg.data = "calc"
-            self.intent_pub.publish(msg)
-            self.get_logger().info("→ INTENT: 계산해주세요")
-            self.last_pub_time = now
-            return
-
-        # 📦 정리
-        if calc <= self.CALC_WEAK_TH:
-            msg.data = "pick"
-            self.intent_pub.publish(msg)
-            self.get_logger().info("→ INTENT: 정리해줘")
-            self.last_pub_time = now
-            return
-
-        self.get_logger().info("⚠️ ambiguous ignored")
-
-    # -----------------------------
-    # 오디오 콜백
-    # -----------------------------
     def audio_cb(self, indata, frames, time_info, status):
-        audio = indata[:, 0]
-        rms = float(np.sqrt(np.mean(audio ** 2)))
+        now = time.time()
+        if now - self.last_pub_time < self.PUB_COOLDOWN:
+            self.audio_buf.fill(0)
+            return
 
-        # 발화 시작 감지
-        if not self.capturing:
-            if rms < self.FRAME_RMS_TH:
+        self.audio_buf = np.roll(self.audio_buf, -len(indata))
+        self.audio_buf[-len(indata):] = indata[:, 0]
+
+        try:
+            current_audio = self.audio_buf.copy()
+            rms_val = self.get_rms(current_audio)
+            if rms_val < self.VOLUME_TH:
+                self.calc_counter = 0
+                return 
+
+            x = self.extract_mfcc(current_audio)
+            self.interpreter.set_tensor(self.input_details["index"], x)
+            self.interpreter.invoke()
+            probs = self.interpreter.get_tensor(self.interpreter.get_output_details()[0]["index"])[0]
+
+            p_idx = self.LABELS.index("pick")
+            c_idx = self.LABELS.index("calc")
+            
+            pick_conf = probs[p_idx]
+            calc_conf = probs[c_idx]
+
+            if pick_conf >= 0.90:
+                self.publish_intent("pick", pick_conf, rms_val)
                 return
-            self.capturing = True
-            self.write_idx = 0
 
-        # 버퍼 채우기
-        remain = self.ONSET_SAMPLES - self.write_idx
-        n = min(len(audio), remain)
-        self.audio_buf[self.write_idx:self.write_idx + n] = audio[:n]
-        self.write_idx += n
+            if calc_conf >= 0.98:
+                self.calc_counter += 1
+                if self.calc_counter >= self.CALC_REQUIRED:
+                    self.publish_intent("calc", calc_conf, rms_val)
+            else:
+                self.calc_counter = 0
+                    
+        except Exception:
+            pass
 
-        # 캡처 완료 → 추론
-        if self.write_idx >= self.ONSET_SAMPLES:
-            probs = self.predict(self.audio_buf.copy())
-            self.decide_and_publish(probs)
-
-            # 리셋
-            self.capturing = False
-            self.write_idx = 0
-
+    def publish_intent(self, label, conf, rms):
+        msg = String()
+        msg.data = label
+        self.intent_pub.publish(msg)
+        self.audio_buf.fill(0) 
+        self.calc_counter = 0 
+        self.last_pub_time = time.time()
+        self.get_logger().info(f"===> [PUBLISHED]: {label.upper()} (Conf: {conf:.2f}, RMS: {rms:.2f})")
 
 def main():
     rclpy.init()
     node = WakeupNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # 정상 종료 시에도 자원 해제
+        if hasattr(node, 'stream'):
+            node.stream.stop()
+            node.stream.close()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()

@@ -1,71 +1,81 @@
 from openai import OpenAI
 import sounddevice as sd
 import scipy.io.wavfile as wav
-import tempfile
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-
-
-# =====================================================
-# 1. .env 로딩 (파일 기준, 경로 문제 방지)
-# =====================================================
-ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(ENV_PATH, override=True)
-
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise RuntimeError("OPENAI_API_KEY not found")
-
-
-# =====================================================
-# 2. STT 클래스
-# =====================================================
 class STT:
-    def __init__(self, openai_api_key):
-        self.client = OpenAI(api_key=openai_api_key)
-        self.duration = 5       # seconds
-        self.samplerate = 16000 # Whisper 권장 샘플레이트
+    def __init__(self, openai_api_key=None):
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        
+        # [수정] 조건문 단순화: 키가 sk-로 시작하면 정상으로 판단
+        if self.api_key and self.api_key.strip().startswith("sk-"):
+            try:
+                self.client = OpenAI(api_key=self.api_key)
+                # 초기화 성공 로그 (길이만 살짝 노출)
+                print(f"✅ [STT] OpenAI 클라이언트 로드 완료")
+            except Exception as e:
+                print(f"❌ OpenAI 클라이언트 초기화 실패: {e}")
+                self.client = None
+        else:
+            print("⚠️ [STT 경고] 유효한 OpenAI API 키가 없습니다.")
+            self.client = None
+
+        self.duration = 5       
+        self.samplerate = 16000 
 
     def speech2text(self):
-        print("음성 녹음을 시작합니다. (5초 동안 말해주세요)")
+        if not self.client:
+            print("❌ [STT] API 키가 없어 분석을 시작할 수 없습니다.", flush=True)
+            return None, None
 
-        audio = sd.rec(
-            int(self.duration * self.samplerate),
-            samplerate=self.samplerate,
-            channels=1,
-            dtype="int16",
-        )
-        sd.wait()
+        print("🔴 [STT] 음성 녹음을 시작합니다. (5초 동안 말씀해주세요)", flush=True)
+        try:
+            # 1. 녹음 수행
+            audio = sd.rec(
+                int(self.duration * self.samplerate),
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="int16",
+            )
+            sd.wait()
+            print("🟢 [STT] 녹음 완료. Whisper 분석 중...", flush=True)
 
-        print("녹음 완료. Whisper에 전송 중...")
+            # 2. 파일 저장 (인코딩 에러 방지를 위해 단순 경로 사용)
+            # tempfile 대신 사용자 홈 디렉토리나 현재 작업 디렉토리에 고정된 이름으로 저장
+            wav_path = os.path.join(os.path.expanduser("~"), "temp_stt_audio.wav")
+            wav.write(wav_path, self.samplerate, audio)
 
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
-            wav.write(temp_wav.name, self.samplerate, audio)
-
-            with open(temp_wav.name, "rb") as f:
+            # 3. Whisper API 호출
+            with open(wav_path, "rb") as f:
                 transcript = self.client.audio.transcriptions.create(
                     model="whisper-1",
                     file=f
                 )
+            
+            text = transcript.text.strip()
+            print(f"✅ [STT 결과]: {text}", flush=True)
+            return text, wav_path
 
-            wav_path = temp_wav.name  # ✅ 추가
+        except Exception as e:
+            # [수정] ascii 에러 방지를 위해 에러 메시지를 str로 명시적 변환
+            error_msg = str(e)
+            print(f"❌ [STT 에러 발생]: {error_msg}", flush=True)
+            return None, None
 
-        text = transcript.text.strip()
-        if not text:
-            print("STT 결과 없음 (침묵 또는 인식 실패)")
-            return None, wav_path     # ✅ 기존 return 확장
-
-        print("STT 결과:", text)
-        return text, wav_path         # ✅ 기존 return 확장
-
-
-# =====================================================
-# 3. 단독 실행 테스트
-# =====================================================
+# ==========================================
+# 단독 실행 테스트 (python3 STT.py)
+# ==========================================
 if __name__ == "__main__":
-    stt = STT(openai_api_key)
-    text, wav_path = stt.speech2text()
-    print("최종 반환:", text)
-    print("wav 경로:", wav_path)
+    stt = STT()
+    text, path = stt.speech2text()
+    
+    if text:
+        print(f"\n최종 인식 문자열: {text}")
+    
+    # 생성된 파일 삭제 (필요시)
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except:
+            pass

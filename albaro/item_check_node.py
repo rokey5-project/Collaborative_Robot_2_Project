@@ -5,228 +5,178 @@ import subprocess
 import time
 import threading
 from pathlib import Path
-
 from ultralytics import YOLO
 
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
-from rclpy.executors import MultiThreadedExecutor  # MultiThreadedExecutor 임포트
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# =====================================================
+# 1. 환경 설정 및 .env 경로 보정 (강화된 로직)
+# =====================================================
+def smart_load_env():
+    # 여러 후보 경로를 탐색합니다.
+    current_file_path = Path(__file__).resolve()
+    candidates = [
+        current_file_path.parent / ".env",               # 현재 파일 옆
+        current_file_path.parent.parent / ".env",        # 상위 폴더
+        Path.cwd() / ".env",                             # 현재 터미널 실행 위치
+        Path("/home/rokey/albaro/src/albaro/albaro/.env") # 절대 경로 (가장 확실)
+    ]
+    
+    for path in candidates:
+        if path.exists():
+            load_dotenv(path, override=True)
+            return path
+    return None
 
-# env 파일 로드
-ENV_PATH = Path(__file__).resolve().parent / ".env"
-load_dotenv(ENV_PATH, override=True)
-
+env_location = smart_load_env()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY not found")
-
 
 class ItemCheckNode(Node):
     def __init__(self):
         super().__init__('item_check_node')
 
+        # API KEY 체크
+        if not OPENAI_API_KEY:
+            self.get_logger().error(f"❌ API KEY 로드 실패! 시도 경로: {env_location if env_location else 'None'}")
+            raise RuntimeError("OPENAI_API_KEY를 .env 파일에서 찾을 수 없습니다.")
+
+        # 구독자: /start_item_check 토픽 수신 시 동작
         self.item_check_sub = self.create_subscription(
-            Bool,
-            '/start_item_check',
-            self.start_check_item,
-            10
+            Bool, '/start_item_check', self.start_check_callback, 10
         )
-
-        self.pub_face = self.create_publisher(
-            Bool,
-            '/need_face_check',
-            10
-        )
-
-        # 🔥 calc 완료 신호
-        self.calc_done_pub = self.create_publisher(
-            String,
-            '/task_done',
-            10
-        )
+        
+        # 발행자: FaceAge 노드 호출 또는 작업 완료 보고
+        self.pub_face = self.create_publisher(Bool, '/need_face_check', 10)
+        self.calc_done_pub = self.create_publisher(String, '/task_done', 10)
 
         self.client = OpenAI(api_key=OPENAI_API_KEY)
 
-        self.active = False
-        self.cass_active = False
-        self.cass_found = False  # `cass_found` 상태를 따로 기록
-        self.start_time = time.time()  # start_time을 0으로 초기화하거나 현재 시간으로 설정
-        self.TIMEOUT_SEC = 7.0
+        # 상태 제어 변수
+        self.trigger_received = False
+        self.cass_found = False
+        self.TIMEOUT_SEC = 5.0
 
-        # 🔥 FaceAge로 넘어갈 때 카메라 종료용 플래그 (추가)
-        self.shutdown_camera = False
+        self.get_logger().info("--- ItemCheckNode Online: Waiting for Signal ---")
 
-        self.get_logger().info("아이템 확인 진행중...")
+    def start_check_callback(self, msg: Bool):
+        if msg.data:
+            self.get_logger().info("🚀 검사 시작 신호 수신!")
+            self.trigger_received = True
 
     def tts(self, text: str):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-            audio_path = f.name
+        try:
+            self.get_logger().info(f"🔊 TTS 안내: {text}")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                audio_path = f.name
 
-        with self.client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
-            input=text
-        ) as response:
-            response.stream_to_file(audio_path)
+            with self.client.audio.speech.with_streaming_response.create(
+                model="gpt-4o-mini-tts", voice="alloy", input=text
+            ) as response:
+                response.stream_to_file(audio_path)
 
-        # TTS 멘트 로그 찍기
-        self.get_logger().info(f"안내: {text}")
+            if os.path.exists(audio_path):
+                subprocess.run(
+                    ["ffplay", "-nodisp", "-autoexit", audio_path],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                os.remove(audio_path)
+        except Exception as e:
+            self.get_logger().error(f"❌ TTS 오류: {e}")
 
-        # subprocess 실행 전에 audio_path가 제대로 생성됐는지 확인
-        if os.path.exists(audio_path):
-            subprocess.run(
-                ["ffplay", "-nodisp", "-autoexit", audio_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            os.remove(audio_path)
-        else:
-            self.get_logger().error("TTS audio file creation failed!")
-
-    def start_check_item(self, msg: Bool):
-        if msg.data and not self.active:
-            self.active = True
-            self.cass_active = False
-            self.shutdown_camera = False
-            self.start_time = time.time()  # start_time을 여기서 초기화
-
-    def cass_detected_once(self):
-        # Record that cass was found
-        self.cass_found = True
-
-        # 카메라 종료
-        self.shutdown_camera = True  # 카메라 종료 플래그를 True로 설정
-
-        # `imshow` 창이 종료되었는지 확인하고 그 후에 FaceAge로 토픽을 발행
-        if self.shutdown_camera:
-            self.get_logger().info("카메라 종료 후, FaceAge로 토픽을 발행하였습니다.")
-            # FaceAge로 넘기기 전에 Face 확인 요청 토픽 발행
+    def send_final_topic(self):
+        if self.cass_found:
             msg = Bool()
             msg.data = True
             self.pub_face.publish(msg)
-
-        # 카메라는 이미 종료된 상태이므로 이후 프로세스를 멈추고 종료
-        self.active = False
-
-
-    def timeout_no_cass(self):
-        # If no item is found, record it and process
-        self.cass_found = False
-        self.active = False
-
-        # 발행 시 cass가 감지되지 않았을 때만 CALC_DONE을 발행
-        done_msg = String()
-        done_msg.data = "CALC_DONE"
-        self.calc_done_pub.publish(done_msg)
-        self.get_logger().info("→ /task_done published: CALC_DONE")
-
-
-# ===============================
-# Main
-# ===============================
-def display_frame(cap, ros_node, model):
-    while rclpy.ok():
-        # 5초 동안은 아무 판단 없이 계속 화면을 보여줍니다
-        ret, frame = cap.read()
-
-        # 프레임 읽기 실패 시 에러 로그
-        if not ret:
-            ros_node.get_logger().error("Failed to capture frame")
-            break
-
-        # YOLO 모델을 실행하여 물체를 감지합니다
-        results = model.predict(source=frame, conf=0.7, verbose=False)
-        result = results[0]
-        boxes = result.boxes
-        classes = result.names
-
-        cass_found = False
-
-        for box in boxes:
-            cls_id = int(box.cls[0])
-            label_name = classes[cls_id]
-
-            if label_name == 'cass':
-                cass_found = True
-
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            conf = float(box.conf[0]) * 100
-            label = f"{label_name} {conf:.1f}%"
-
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                frame, label, (x1, y1 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2
-            )
-
-        # cass를 감지한 경우 `cass_found`를 True로 기록
-        if cass_found and not ros_node.cass_active:
-            ros_node.cass_active = True
-            ros_node.cass_detected_once()
-
-        if not cass_found and ros_node.active:
-            if time.time() - ros_node.start_time >= ros_node.TIMEOUT_SEC:
-                ros_node.timeout_no_cass()
-
-        # Show the frame for 5 seconds
-        cv2.imshow("Item Check", frame)
-
-        # 5초가 지나면 자동으로 imshow 종료
-        if time.time() - ros_node.start_time >= 5.0:
-            # cass의 감지 여부에 따라 TTS를 실행
-            if ros_node.cass_found:
-                ros_node.tts("인증이 필요한 상품입니다.")
-            else:
-                ros_node.tts("감사합니다.")
-            
-            # 2초 대기 후 화면 종료
-            time.sleep(2)  # 2초 후에 강제 종료
-
-            # 강제 종료 및 카메라 리소스 해제
-            ros_node.timeout_no_cass()
-            break
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            self.get_logger().info("✅ [결과] 성인 상품 감지 -> FaceAge로 바통 터치")
+        else:
+            done_msg = String()
+            done_msg.data = "CALC_DONE"
+            self.calc_done_pub.publish(done_msg)
+            self.get_logger().info("✅ [결과] 일반 상품 -> 시스템 리셋")
 
 def main():
     rclpy.init()
     ros_node = ItemCheckNode()
 
-    model = YOLO('best.pt')
+    # YOLO 모델 로드 (경로 에러 방지를 위해 절대 경로 사용 추천)
+    model_path = Path("/home/rokey/albaro/src/albaro/albaro/best.pt")
+    if not model_path.exists():
+        model_path = "best.pt" # 못 찾으면 현재 위치 시도
+    
+    model = YOLO(str(model_path))
 
-    cap = cv2.VideoCapture(8)
-    if not cap.isOpened():
-        raise RuntimeError("카메라를 열 수 없습니다")
-
-    print("ItemCheck node running")
-
-    # Start the frame display in a separate thread using MultiThreadedExecutor
-    display_thread = threading.Thread(target=display_frame, args=(cap, ros_node, model))
-    display_thread.start()
-
-    # Create an executor to manage multiple threads
-    executor = MultiThreadedExecutor()
-    executor.add_node(ros_node)
+    # ROS 통신용 스레드 분리
+    ros_thread = threading.Thread(target=rclpy.spin, args=(ros_node,), daemon=True)
+    ros_thread.start()
 
     try:
-        # Execute the ROS node in multiple threads
-        executor.spin()
+        while rclpy.ok():
+            if not ros_node.trigger_received:
+                time.sleep(0.1)
+                continue
+
+            cap = cv2.VideoCapture(8)
+            if not cap.isOpened():
+                ros_node.get_logger().error("❌ 카메라 8번 점유 실패!")
+                ros_node.trigger_received = False
+                continue
+
+            ros_node.get_logger().info("📸 감지 시작 (5초간 유지)")
+            ros_node.cass_found = False
+            start_time = time.time()
+
+            while rclpy.ok():
+                ret, frame = cap.read()
+                if not ret: break
+
+                elapsed = time.time() - start_time
+                results = model.predict(source=frame, conf=0.5, verbose=False)
+                
+                for box in results[0].boxes:
+                    label = results[0].names[int(box.cls[0])]
+                    if label.lower() == 'cass':
+                        ros_node.cass_found = True
+                    
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                remaining = max(0, ros_node.TIMEOUT_SEC - elapsed)
+                cv2.putText(frame, f"Checking... {remaining:.1f}s", (30, 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+                cv2.imshow("Item Check", frame)
+                cv2.waitKey(1)
+
+                if elapsed >= ros_node.TIMEOUT_SEC:
+                    break
+
+            cap.release()
+            cv2.destroyAllWindows()
+            
+            for _ in range(10): cv2.waitKey(1)
+            time.sleep(0.5) 
+
+            if ros_node.cass_found:
+                ros_node.tts("인증이 필요한 상품입니다.")
+            else:
+                ros_node.tts("감사합니다.")
+
+            ros_node.send_final_topic()
+            ros_node.trigger_received = False
+
+    except KeyboardInterrupt:
+        pass
     finally:
-        # Wait for the display thread to finish
-        display_thread.join()
-
-        # Ensure that the display window is closed and resources are released
-        cap.release()
-        cv2.destroyAllWindows()
-        ros_node.destroy_node()
-        rclpy.shutdown()
-
+        if rclpy.ok():
+            ros_node.destroy_node()
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
