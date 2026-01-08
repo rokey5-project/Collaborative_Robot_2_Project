@@ -3,6 +3,7 @@ import tempfile
 import subprocess
 import time
 import threading
+
 from queue import Queue
 from pathlib import Path
 from PIL import Image
@@ -16,58 +17,22 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
-# =====================================================
-# 1. 환경 설정 및 .env 경로 보정 (수정된 부분)
-# =====================================================
-# 런치 파일 실행 시 경로 문제를 방지하기 위해 절대 경로로 설정합니다.
-def load_env_file():
-    # 1. 현재 파일의 부모 폴더 (albaro/albaro/)
-    current_dir = Path(__file__).resolve().parent
-    # 2. 패키지 루트 폴더 (albaro/)
-    package_root = current_dir.parent
 
-    # 우선순위에 따라 .env 파일 로드
-    env_locations = [current_dir / ".env", package_root / ".env", Path.cwd() / ".env"]
-    
-    for loc in env_locations:
-        if loc.exists():
-            load_dotenv(loc, override=True)
-            return loc
-    return None
-
-env_path = load_env_file()
-openai_api_key = os.getenv("OPENAI_API_KEY")
-
-# =====================================================
-# 유틸리티 함수 (원본 유지)
-# =====================================================
-def iou(boxA, boxB):
-    xA = max(boxA[0], boxB[0])
-    yA = max(boxA[1], boxB[1])
-    xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
-    yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
-    interW = max(0, xB - xA)
-    interH = max(0, yB - yA)
-    interArea = interW * interH
-    union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - interArea
-    return interArea / union if union > 0 else 0.0
-
-# =====================================================
-# 2. FaceAgeNode 클래스
-# =====================================================
 class FaceAgeNode(Node):
     def __init__(self):
         super().__init__('face_age_node')
-        
+
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+
         # API Key 체크
         if not openai_api_key:
-            self.get_logger().error(f"❌ API KEY 로드 실패! 시도한 경로: {env_path if env_path else 'None'}")
+            self.get_logger().error(f"❌ API KEY 로드 실패! 시도한 경로")
             raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
 
         # ROS2 설정
         self.sub = self.create_subscription(Bool, '/need_face_check', self.start_callback, 10)
         self.done_pub = self.create_publisher(String, '/task_done', 10)
-        
+
         # 모델 및 클라이언트 초기화
         self.client = OpenAI(api_key=openai_api_key)
         model_name = "prithivMLmods/facial-age-detection"
@@ -138,7 +103,7 @@ class FaceAgeNode(Node):
         now = time.time()
         best_iou, best_id = 0.0, None
         for pid, info in self.tracks.items():
-            score = iou(box, info["box"])
+            score = self.iou(box, info["box"])
             if score > best_iou:
                 best_iou, best_id = score, pid
         if best_iou >= self.TRACK_IOU_TH:
@@ -155,12 +120,24 @@ class FaceAgeNode(Node):
         self.tracks = {pid: info for pid, info in self.tracks.items()
                        if now - info["last_seen"] <= self.TRACK_TTL}
 
+    def iou(boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
+        yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
+        interW = max(0, xB - xA)
+        interH = max(0, yB - yA)
+        interArea = interW * interH
+        union = boxA[2] * boxA[3] + boxB[2] * boxB[3] - interArea
+
+        return interArea / union if union > 0 else 0.0
+
     def run_logic(self):
         self._ensure_resources_cleaned()
         cap = cv2.VideoCapture(8)
-        
+
         if not cap.isOpened():
-            self.get_logger().error("웹캠 8번 오픈 실패!")
+            self.get_logger().error("웹캠 오픈 실패!")
             self.is_active = False
             return
 
@@ -177,7 +154,7 @@ class FaceAgeNode(Node):
                 pid = self.assign_id((x, y, w, h))
                 face = frame[y:y+h, x:x+w]
                 if face.size == 0: continue
-                
+
                 age_group = self.classify_image(face)
 
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
@@ -195,12 +172,12 @@ class FaceAgeNode(Node):
 
         cap.release()
         cv2.destroyAllWindows()
-        
+
         # 완료 신호 송신
         done_msg = String()
         done_msg.data = "CALC_DONE"
         self.done_pub.publish(done_msg)
-        
+
         self.is_active = False
         self.get_logger().info("--- 성인 인증 종료 및 리셋 신호 송신 ---")
 

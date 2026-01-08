@@ -7,13 +7,9 @@ class StateManager(Node):
     def __init__(self):
         super().__init__("state_manager")
 
-        self.is_busy = False 
-        self.current_task = None 
+        self.is_busy = False
+        self.current_task = None
 
-        # ---------------------------------------------------------
-        # 구독자 (Subscriber)
-        # ---------------------------------------------------------
-        # WakeupNode로부터 인텐트 수신
         self.intent_sub = self.create_subscription(
             String, "/wakeup_intent", self.intent_cb, 10
         )
@@ -23,12 +19,9 @@ class StateManager(Node):
             String, "/task_done", self.task_done_cb, 10
         )
 
-        # ---------------------------------------------------------
-        # 발행자 (Publisher)
-        # ---------------------------------------------------------
         self.start_item_pub = self.create_publisher(Bool, "/start_item_check", 10)
         self.start_orc_pub = self.create_publisher(Bool, "/start_orc", 10)
-        
+
         # WakeupNode를 강제 종료시켜 마이크 자원을 회수하는 토픽
         self.kill_wakeup_pub = self.create_publisher(Bool, "/kill_wakeup", 10)
 
@@ -55,14 +48,14 @@ class StateManager(Node):
         elif intent == "pick":
             self.is_busy = True
             self.current_task = "PICK"
-            
+
             self.get_logger().warn("💀 [PICK 감지] WakeupNode 종료 명령 송신 (마이크 해제)")
             # WakeupNode에게 즉시 종료 신호 전송
             self.kill_wakeup_pub.publish(Bool(data=True))
-            
+
             # 마이크 장치가 OS에 완전히 반환될 수 있도록 대기 (중요)
             time.sleep(2.0)
-            
+
             self.get_logger().info("🤖 Orchestrator(STT) 가동 신호를 보냅니다.")
             self.start_orc_pub.publish(Bool(data=True))
 
@@ -71,13 +64,13 @@ class StateManager(Node):
 
     def task_done_cb(self, msg: String):
         task_status = msg.data.strip().upper()
-        
+
         if task_status in ["CALC_DONE", "PICK_DONE"]:
             self.get_logger().info("----------------------------------------")
             self.get_logger().info(f"✅ [작업 완료 보고] {task_status}")
             self.get_logger().info(f"🔄 시스템 리셋: {self.current_task} → IDLE")
             self.get_logger().info("----------------------------------------")
-            
+
             self.is_busy = False
             self.current_task = None
         else:

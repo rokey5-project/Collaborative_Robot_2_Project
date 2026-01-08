@@ -42,33 +42,6 @@ class MicController:
             self.audio.terminate()
             self.audio = None
 
-    # def record_audio(self):
-    #     print("start recording for 5 seconds")
-    #     self.frames = []  # 이전 프레임 초기화
-    #     num_chunks = int(self.config.rate / self.config.chunk * self.config.record_seconds)
-
-    #     for _ in range(num_chunks):
-    #         data = self.stream.read(self.config.chunk, exception_on_overflow=False)
-    #         self.frames.append(data)
-
-    # def save_wav(self, filename):
-    #     """녹음된 데이터를 WAV 파일로 저장합니다."""
-    #     with wave.open(filename, 'wb') as wf:
-    #         wf.setnchannels(self.config.channels)
-    #         wf.setsampwidth(self.sample_width)
-    #         wf.setframerate(self.config.rate)
-    #         wf.writeframes(b''.join(self.frames))
-    #     print("✅ 파일 저장 완료!")
-
-    # def get_wav_data(self):
-    #     wav_buffer = io.BytesIO()
-    #     with wave.open(wav_buffer, 'wb') as wf:
-    #         wf.setnchannels(self.config.channels)
-    #         wf.setsampwidth(self.audio.get_sample_size(self.config.fmt))
-    #         wf.setframerate(self.config.rate)
-    #         wf.writeframes(b''.join(self.frames))
-    #     return wav_buffer.getvalue()
-
     def record_audio(self) -> bytes:
         mic = MicController()
         mic.open_stream()

@@ -8,8 +8,7 @@ class ExtractKeyword:
     def __init__(self, api_key=None):
         self.api_key = os.getenv("OPENAI_API_KEY")
 
-        # [수정] 조건문 정상화: 키가 존재하고 sk-로 시작하면 정상 통과
-        if self.api_key and self.api_key.strip().startswith("sk-"):
+        if self.api_key:
             try:
                 self.llm = ChatOpenAI(
                     model="gpt-4o",
@@ -31,7 +30,7 @@ class ExtractKeyword:
 당신은 사용자의 문장에서 사물(item), 개수(count)를 추출하는 시스템입니다.
 
 <중요 규칙>
-- 사용자 입력에 사물(item)에 해당하는 명확한 단어가 하나도 없으면 반드시 다음 형식으로만 출력하세요: / 
+- 사용자 입력에 사물(item)에 해당하는 명확한 단어가 하나도 없으면 반드시 다음 형식으로만 출력하세요: /
 
 <출력 규칙>
 - 반드시 단 한 줄만 출력

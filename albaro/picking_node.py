@@ -7,7 +7,6 @@ from cv_bridge import CvBridge
 import cv2
 import threading
 import numpy as np
-import os
 import time
 from ultralytics import YOLO
 from scipy.spatial.transform import Rotation
@@ -20,7 +19,7 @@ class VisionPickingNode(Node):
     def __init__(self, dsr_functions):
         super().__init__('picking_node')
         self.bridge = CvBridge()
-        
+
         # DSR 함수 바인딩
         self.get_current_posx = dsr_functions['get_current_posx']
         self.movel = dsr_functions['movel']
@@ -30,20 +29,20 @@ class VisionPickingNode(Node):
 
         # YOLOv8 모델 로드
         self.model = YOLO('best.pt')
-        
+
         # 구독 설정 (이미지 및 Depth)
         self.img_sub = self.create_subscription(
             Image, '/camera/camera/color/image_raw', self.vision_callback, 10)
         self.depth_sub = self.create_subscription(
             Image, '/camera/camera/aligned_depth_to_color/image_raw', self.depth_callback, 10)
-        
+
         # 카메라 파라미터 및 캘리브레이션 데이터 (실제 값으로 확인 필요)
         self.intrinsics = {"fx": 606.33, "fy": 605.55, "ppx": 323.07, "ppy": 238.41}
         self.gripper2cam = np.load("T_gripper2camera.npy")
-        
+
         # 그리퍼 초기화
         self.gripper = RG("rg2", "192.168.1.1", "502")
-        
+
         # 상태 변수
         self.last_frame = None
         self.last_depth_frame = None
@@ -57,20 +56,20 @@ class VisionPickingNode(Node):
         frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
         results = self.model.predict(source=frame, conf=0.6, verbose=False)
         self.last_frame = results[0].plot()
-        
+
         # [수정] 타겟 레이블 지정
         target_label = "pringles"  # "oreo", "pringles"
-        
+
         if not self.is_robot_busy:
             boxes = results[0].boxes
             for box in boxes:
                 cls_id = int(box.cls[0])
                 label = results[0].names[cls_id]
-                
+
                 if label == target_label:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    
+
                     self.get_logger().info(f"타겟 [{label}] 감지! 피킹 스레드 시작.")
                     # 피킹 스레드 실행 (label 인자 포함)
                     threading.Thread(target=self.execute_pick, args=(cx, cy, label)).start()
@@ -90,7 +89,7 @@ class VisionPickingNode(Node):
             time.sleep(0.1)
 
         self.get_logger().info(f"--- {label} Picking Process Started ---")
-        
+
         try:
             if self.last_depth_frame is None:
                 self.get_logger().error("Depth 이미지가 수신되지 않았습니다.")
@@ -116,7 +115,7 @@ class VisionPickingNode(Node):
             base2gripper = np.eye(4)
             base2gripper[:3, :3] = R
             base2gripper[:3, 3] = curr_pos[:3]
-            
+
             base2cam = base2gripper @ self.gripper2cam
             target_pos = np.dot(base2cam, cam_coords)[:3]
 
@@ -124,12 +123,12 @@ class VisionPickingNode(Node):
 
             # 4. 로봇 동작 시퀀스 (실제 movel 호출)
             # A. 접근 위치 (물체 100mm 위)
-            approach = self.posx([target_pos[0], target_pos[1], target_pos[2] + 100, 
+            approach = self.posx([target_pos[0], target_pos[1], target_pos[2] + 100,
                                  curr_pos[3], curr_pos[4], curr_pos[5]])
             self.movel(approach, vel=60, acc=60)
 
             # B. 피킹 위치로 하강
-            pick = self.posx([target_pos[0], target_pos[1], target_pos[2]-40, 
+            pick = self.posx([target_pos[0], target_pos[1], target_pos[2]-40,
                              curr_pos[3], curr_pos[4], curr_pos[5]])
             self.movel(pick, vel=30, acc=30)
 
@@ -148,7 +147,7 @@ class VisionPickingNode(Node):
 
         except Exception as e:
             self.get_logger().error(f"동작 중 오류 발생: {e}")
-        
+
         finally:
             self.is_robot_busy = False
 
@@ -166,7 +165,7 @@ def main(args=None):
     try:
         from DSR_ROBOT2 import get_current_posx, movej, movel, wait
         from DR_common2 import posx, posj
-        
+
         dsr_funcs = {
             'get_current_posx': get_current_posx,
             'movej': movej,

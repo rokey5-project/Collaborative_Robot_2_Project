@@ -3,19 +3,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-def update_plot(frame):
-    data = stream.read(CHUNK)
-    audio_data = np.frombuffer(data, dtype=np.int16)
-    line.set_ydata(audio_data)
-    
-    return line,
 
-
-# Parameters for the microphone test
 FORMAT = pyaudio.paInt16  # Format for the audio
 CHANNELS = 1  # Mono audio
 RATE = 48000  # Sample rate (44.1kHz is standard for audio)
 CHUNK = 12000  # Size of each audio chunk
+
+def update_plot(frame):
+    data = stream.read(CHUNK)
+    audio_data = np.frombuffer(data, dtype=np.int16)
+    line.set_ydata(audio_data)
+
+    return line,
 
 p = pyaudio.PyAudio()
 

@@ -22,7 +22,7 @@ class SmartStoreNode(Node):
     def __init__(self, dsr_functions):
         super().__init__('smart_store_node')
         self.bridge = CvBridge()
-        
+
         # 1. DSR 함수 바인딩
         self.get_current_posx = dsr_functions['get_current_posx']
         self.movel = dsr_functions['movel']
@@ -43,7 +43,7 @@ class SmartStoreNode(Node):
             self.gripper2cam = np.eye(4)
 
         # 3. 상태 관리
-        self.order_queue = [] 
+        self.order_queue = []
         self.is_robot_busy = False
         self.last_frame = None
         self.last_depth_frame = None
@@ -97,7 +97,7 @@ class SmartStoreNode(Node):
         elif len(self.order_queue) == 0:
             data_str = msg.data.replace("'", '"')
             inventory = json.loads(data_str)
-            
+
             for item, count in inventory.items():
                 if count == 0 and item in self.routes:
                     self.get_logger().info(f"재고 부족 감지! {item}을 3개 보충합니다.")
@@ -105,24 +105,6 @@ class SmartStoreNode(Node):
                         self.order_queue.append(item)
         else:
             threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start()
-
-        # """재고 정보(JSON)를 파싱하여 0개인 품목을 주문 큐에 추가"""
-        # if self.is_robot_busy or len(self.order_queue) > 0:
-        #     return
-        # try:
-        #     # JSON 파싱 (작은따옴표 문제 해결을 위해 replace 사용)
-        #     data_str = msg.data.replace("'", '"')
-        #     inventory = json.loads(data_str)
-        #     for item, count in inventory.items():
-        #         if count == 0 and item in self.routes:
-        #             self.get_logger().info(f"재고 부족 감지! {item}을 3개 보충합니다.")
-        #             for _ in range(3):
-        #                 self.order_queue.append(item)
-        #                 threading.Thread(target=self.delivery_process, args=(item,), daemon=True).start()
-        #             break 
-             
-        # except Exception as e:
-        #     pass
 
     def order_callback(self, msg):
         try:
@@ -132,16 +114,16 @@ class SmartStoreNode(Node):
                 for _ in range(count):
                     self.order_queue.append(item)
                 print(f"{item, count}")
-            
-            threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start() 
-            
+
+            threading.Thread(target=self.delivery_process, args=(self.order_queue[0],), daemon=True).start()
+
         except Exception as e:
             self.get_logger().error(f"주문 파싱 오류: {e}")
 
     def vision_callback(self, msg):
         # print("get topic")
         self.last_frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
-        
+
         # 큐에 주문이 있는지 확인
         if not self.order_queue:
             return # 주문이 없으면 아무것도 안 함
@@ -160,7 +142,7 @@ class SmartStoreNode(Node):
         self.get_logger().info(f"--- [스레드 시작] 타겟: {label} ---")
         try:
             self.is_robot_busy = True
-            
+
             # 1. 경로 존재 여부 확인
             if label not in self.routes:
                 self.get_logger().error(f"경로 데이터에 '{label}'이 없습니다!")
@@ -175,7 +157,7 @@ class SmartStoreNode(Node):
             # 3. 객체 인식
             self.get_logger().info(f"YOLO 인식 시도: {label}")
             results = self.model.predict(source=self.last_frame, conf=0.75, verbose=False)
-            
+
             target_box = None
             for box in results[0].boxes:
                 if results[0].names[int(box.cls[0])] == label:
@@ -194,17 +176,17 @@ class SmartStoreNode(Node):
                 self.get_logger().info(f"좌표 감지 ({cx}, {cy}), 피킹 실행")
                 self.get_logger().info(f"")
                 self.execute_vision_pick(cx, cy)
-                
+
                 self.get_logger().info("매대로 이동 중...")
                 self.routes[label]['stand']()
 
-                # 4. 완료 후 큐에서 제거        
+                # 4. 완료 후 큐에서 제거
                 self.order_queue.pop(0)
                 self.get_logger().info(f"--- [스레드 종료] {label} 처리 완료 ---")
             else:
                 self.get_logger().warn(f"화면에서 {label}을 찾지 못했습니다.")
                 self.order_queue = [word for word in self.order_queue if word != label]
-                
+
                 self.movel(self.posx(0, 0, 300, 0, 0, 0),vel=60, acc=60, mod=1)
                 self.movej(self.posj(0, 0, 90, 0, 90, 0), vel=30, acc=30,  ra=1)
 
@@ -218,7 +200,7 @@ class SmartStoreNode(Node):
         """Depth 기반 정밀 피킹"""
         try:
             z_mm = self.last_depth_frame[cy, cx]
-            if z_mm > 0: 
+            if z_mm > 0:
                 self.get_logger().error("Depth 값이 0입니다. 피킹을 취소합니다.")
                 # 카메라 좌표 계산
                 cam_x = (cx - self.intrinsics["ppx"]) * z_mm / self.intrinsics["fx"]
@@ -235,26 +217,26 @@ class SmartStoreNode(Node):
                 pick = self.posx([target_pos[0]+70, curr_pos[1], curr_pos[2], curr_pos[3], curr_pos[4], curr_pos[5]])
 
                 self.get_logger().info(f"상세 좌표: {target_pos}")
-                
 
 
-                self.get_logger().info("2. Pick 지점(L) 이동") 
+
+                self.get_logger().info("2. Pick 지점(L) 이동")
                 self.movel(pick, vel=20, acc=20)
 
-            
+
             self.wait(0.5)
             self.get_logger().info("3. 그리퍼 닫기")
-            self.set_do(1, 1); self.set_do(2, 0); self.wait(1.0) 
-            
+            self.set_do(1, 1); self.set_do(2, 0); self.wait(1.0)
+
             self.get_logger().info("4. 물체 들어올리기(L)")
             # self.movel(approach, vel=40, acc=40)
             self.movel(self.posx(0, 0, 100, 0, 0, 0),vel=60, acc=60, mod=1)
-            
+
             self.get_logger().info("5. 중간 안전지대 이동(J)")
             # 관절 포즈는 movej로 이동
             self.movej(self.posj(-21.00, -7.23, 102.58, 1.29, -6.27, 88.93), vel=30, acc=30, ra=1)
             self.movej(self.posj(-34.18, -14.68, 94.26, 1.29, 8.00, 88.93), vel=30, acc=30, ra=1)
-            
+
             self.get_logger().info("피킹 및 중간 동작 완료")
 
         except Exception as e:
@@ -269,7 +251,7 @@ class SmartStoreNode(Node):
         self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
         self.movel(self.posx(0, 0, 30, 0, 0, 0),vel=60, acc=60, mod=1)
         self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
-        
+
 
     def stand2(self):
         self.movej(self.posj(-41.43, 13.20, 59.31, -8.71, 98.39, 45.49), vel=60, acc=60, ra=1)
@@ -284,7 +266,7 @@ class SmartStoreNode(Node):
         self.set_do(1, 0); self.set_do(2, 1); self.wait(1.0) # 그리퍼 열기
         self.movej(self.posj(-61.71, -2.94, 75.61, -5.01, 95.74, 26.26), vel=60, acc=60, ra=1)
         self.movej(self.posj(-9.08, 13.64, 71.30, -3.78, 93.99, 80.38),vel=60, acc=60, ra=1)
-    
+
     def stand4(self):
         self.movej(self.posj(-92.90, -8.97, 82.16, 1.34, 94.19, -3.99), vel=60, acc=60, ra=1)
         self.movej(self.posj(-94.38, -6.91, 95.10, 1.50, 79.83, -5.67), vel=60, acc=60, ra=1)
@@ -295,10 +277,10 @@ class SmartStoreNode(Node):
 # --- 메인 함수 (에러 해결용 초기화 구조) ---
 def main(args=None):
     rclpy.init(args=args)
-    
+
     # 1. 로봇 노드 생성
     robot_node = rclpy.create_node("dsr_vision_node", namespace="dsr01")
-    
+
     # 2. DSR 라이브러리 초기화 (중요: 임포트 전 설정)
     DR_init.__dsr__node = robot_node
     DR_init.__dsr__id = "dsr01"
@@ -308,7 +290,7 @@ def main(args=None):
     try:
         import DSR_ROBOT2 as dsr
         from DR_common2 import posx, posj
-        
+
         dsr_funcs = {
             'get_current_posx': dsr.get_current_posx,
             'movej': dsr.movej,
@@ -324,7 +306,7 @@ def main(args=None):
 
     # 4. 스마트 스토어 노드 생성
     node = SmartStoreNode(dsr_funcs)
-    
+
     # 5. 멀티스레드 실행기 설정
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(robot_node)

@@ -4,6 +4,7 @@ import tempfile
 import subprocess
 import time
 import threading
+
 from pathlib import Path
 from ultralytics import YOLO
 
@@ -11,45 +12,24 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
-from dotenv import load_dotenv
 from openai import OpenAI
-
-# =====================================================
-# 1. 환경 설정 및 .env 경로 보정 (강화된 로직)
-# =====================================================
-def smart_load_env():
-    # 여러 후보 경로를 탐색합니다.
-    current_file_path = Path(__file__).resolve()
-    candidates = [
-        current_file_path.parent / ".env",               # 현재 파일 옆
-        current_file_path.parent.parent / ".env",        # 상위 폴더
-        Path.cwd() / ".env",                             # 현재 터미널 실행 위치
-        Path("/home/rokey/albaro/src/albaro/albaro/.env") # 절대 경로 (가장 확실)
-    ]
-    
-    for path in candidates:
-        if path.exists():
-            load_dotenv(path, override=True)
-            return path
-    return None
-
-env_location = smart_load_env()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 class ItemCheckNode(Node):
     def __init__(self):
         super().__init__('item_check_node')
 
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
         # API KEY 체크
         if not OPENAI_API_KEY:
-            self.get_logger().error(f"❌ API KEY 로드 실패! 시도 경로: {env_location if env_location else 'None'}")
+            self.get_logger().error(f"❌ API KEY 로드 실패!")
             raise RuntimeError("OPENAI_API_KEY를 .env 파일에서 찾을 수 없습니다.")
 
         # 구독자: /start_item_check 토픽 수신 시 동작
         self.item_check_sub = self.create_subscription(
             Bool, '/start_item_check', self.start_check_callback, 10
         )
-        
+
         # 발행자: FaceAge 노드 호출 또는 작업 완료 보고
         self.pub_face = self.create_publisher(Bool, '/need_face_check', 10)
         self.calc_done_pub = self.create_publisher(String, '/task_done', 10)
@@ -108,7 +88,7 @@ def main():
     model_path = Path("/home/rokey/albaro/src/albaro/albaro/best.pt")
     if not model_path.exists():
         model_path = "best.pt" # 못 찾으면 현재 위치 시도
-    
+
     model = YOLO(str(model_path))
 
     # ROS 통신용 스레드 분리
@@ -137,18 +117,18 @@ def main():
 
                 elapsed = time.time() - start_time
                 results = model.predict(source=frame, conf=0.5, verbose=False)
-                
+
                 for box in results[0].boxes:
                     label = results[0].names[int(box.cls[0])]
                     if label.lower() == 'cass':
                         ros_node.cass_found = True
-                    
+
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
                 remaining = max(0, ros_node.TIMEOUT_SEC - elapsed)
-                cv2.putText(frame, f"Checking... {remaining:.1f}s", (30, 50), 
+                cv2.putText(frame, f"Checking... {remaining:.1f}s", (30, 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
                 cv2.imshow("Item Check", frame)
@@ -159,9 +139,9 @@ def main():
 
             cap.release()
             cv2.destroyAllWindows()
-            
+
             for _ in range(10): cv2.waitKey(1)
-            time.sleep(0.5) 
+            time.sleep(0.5)
 
             if ros_node.cass_found:
                 ros_node.tts("인증이 필요한 상품입니다.")
