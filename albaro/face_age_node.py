@@ -3,6 +3,7 @@ import tempfile
 import subprocess
 import time
 import threading
+from collections import deque
 
 from queue import Queue
 from pathlib import Path
@@ -51,6 +52,10 @@ class FaceAgeNode(Node):
         self.TRACK_TTL = 2.0
         self.is_active = False
 
+        # 최근 N개 샘플 일관성 검사 설정
+        self.WINDOW_SIZE = 5  # 최근 5개 샘플 확인
+        self.REQUIRED_SAME_COUNT = 5  # 5개 전부 같아야 확정
+
         # TTS 큐 및 스레드
         self.tts_queue = Queue()
         self.tts_thread = threading.Thread(target=self.tts_worker, daemon=True)
@@ -92,12 +97,41 @@ class FaceAgeNode(Node):
                 self.tts_queue.task_done()
 
     def classify_image(self, image):
+        """이미지 분류"""
         image = Image.fromarray(image).convert("RGB")
         inputs = self.processor(images=image, return_tensors="pt")
         with torch.no_grad():
             outputs = self.model(**inputs)
             probs = torch.softmax(outputs.logits, dim=1).squeeze()
         return self.id2label[int(torch.argmax(probs))]
+
+    def check_consistency(self, recent_predictions):
+        """
+        최근 N개 샘플의 일관성 검사
+
+        Args:
+            recent_predictions: deque of age labels
+
+        Returns:
+            (is_consistent, consistent_label)
+        """
+        if len(recent_predictions) < self.WINDOW_SIZE:
+            return False, None
+
+        # 최근 WINDOW_SIZE개 샘플 가져오기
+        recent = list(recent_predictions)[-self.WINDOW_SIZE:]
+
+        # 모든 값이 같은지 확인
+        first_label = recent[0]
+        same_count = sum(1 for label in recent if label == first_label)
+
+        # REQUIRED_SAME_COUNT개 이상이 같으면 일관성 있음
+        is_consistent = same_count >= self.REQUIRED_SAME_COUNT
+
+        if is_consistent:
+            return True, first_label
+        else:
+            return False, None
 
     def assign_id(self, box):
         now = time.time()
@@ -112,7 +146,13 @@ class FaceAgeNode(Node):
             return best_id
         pid = self.next_person_id
         self.next_person_id += 1
-        self.tracks[pid] = {"box": box, "warned": False, "last_seen": now}
+        self.tracks[pid] = {
+            "box": box,
+            "warned": False,
+            "last_seen": now,
+            "recent_predictions": deque(maxlen=20),  # 최근 예측 저장 (최대 20개)
+            "final_age": None
+        }
         return pid
 
     def cleanup_tracks(self):
@@ -120,7 +160,7 @@ class FaceAgeNode(Node):
         self.tracks = {pid: info for pid, info in self.tracks.items()
                        if now - info["last_seen"] <= self.TRACK_TTL}
 
-    def iou(boxA, boxB):
+    def iou(self, boxA, boxB):
         xA = max(boxA[0], boxB[0])
         yA = max(boxA[1], boxB[1])
         xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
@@ -142,10 +182,17 @@ class FaceAgeNode(Node):
             return
 
         start_time = time.time()
+        frame_count = 0
+
         # 15초 동안 감지 수행
         while rclpy.ok() and (time.time() - start_time < 15.0):
             ret, frame = cap.read()
             if not ret: break
+
+            # 3프레임마다 한 번만 처리
+            frame_count += 1
+            if frame_count % 3 != 0:
+                continue
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = self.face_cascade.detectMultiScale(gray, 1.1, 10, minSize=(30, 30))
@@ -155,16 +202,64 @@ class FaceAgeNode(Node):
                 face = frame[y:y+h, x:x+w]
                 if face.size == 0: continue
 
-                age_group = self.classify_image(face)
+                track_info = self.tracks[pid]
 
-                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {pid} | {age_group}", (x, y-10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                # 아직 최종 판정이 나지 않은 경우에만 예측 수행
+                if track_info["final_age"] is None:
+                    age_group = self.classify_image(face)
+                    track_info["recent_predictions"].append(age_group)
 
-                if age_group in ("age 01-10", "age 11-20"):
-                    if not self.tracks[pid]["warned"]:
-                        self.tts_queue.put("미성년자는 구매할 수 없습니다.")
-                        self.tracks[pid]["warned"] = True
+                    # 최근 예측들의 분포 표시
+                    recent_list = list(track_info["recent_predictions"])
+                    self.get_logger().info(
+                        f"ID {pid}: {age_group} | 최근 {len(recent_list)}개: {recent_list[-5:]}"
+                    )
+
+                    # 일관성 검사
+                    is_consistent, consistent_label = self.check_consistency(
+                        track_info["recent_predictions"]
+                    )
+
+                    if is_consistent:
+                        track_info["final_age"] = consistent_label
+
+                        self.get_logger().info(
+                            f"\n{'='*60}\n"
+                            f"✅ ID {pid} 최종 판정: {consistent_label}\n"
+                            f"   (최근 {self.WINDOW_SIZE}개 샘플이 모두 일치)\n"
+                            f"{'='*60}"
+                        )
+
+                        # 미성년자 판정 시 경고
+                        if consistent_label in ("age 01-10", "age 11-20"):
+                            if not track_info["warned"]:
+                                self.tts_queue.put("미성년자는 구매할 수 없습니다.")
+                                track_info["warned"] = True
+
+                # 화면 표시
+                if track_info["final_age"]:
+                    display_text = f"ID {pid} | {track_info['final_age']} (확정)"
+                    color = (0, 0, 255) if track_info['final_age'] in ("age 01-10", "age 11-20") else (0, 255, 0)
+                else:
+                    recent_count = len(track_info['recent_predictions'])
+                    display_text = f"ID {pid} | 분석중 ({recent_count})"
+
+                    # 일관성이 높아지고 있는지 시각적 피드백
+                    if recent_count >= self.WINDOW_SIZE:
+                        recent_5 = list(track_info['recent_predictions'])[-self.WINDOW_SIZE:]
+                        unique_count = len(set(recent_5))
+                        if unique_count == 1:
+                            color = (0, 255, 0)  # 5개 모두 같음
+                        elif unique_count == 2:
+                            color = (0, 255, 255)  # 2종류
+                        else:
+                            color = (0, 165, 255)  # 3종류 이상
+                    else:
+                        color = (255, 255, 0)
+
+                cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
+                cv2.putText(frame, display_text, (x, y-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             self.cleanup_tracks()
             cv2.imshow("Age Detection", frame)
